@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 这里可以添加特定的相机的 Vendor ID，如果不确定，可以先留空匹配所有 USB 设备 -->
+    <usb-device vendor-id="1200" /> <!-- Nikon -->
+    <usb-device vendor-id="1193" /> <!-- Canon -->
+    <usb-device vendor-id="1356" /> <!-- Sony -->
+    <usb-device vendor-id="1027" /> <!-- Fuji -->
+</resources>
