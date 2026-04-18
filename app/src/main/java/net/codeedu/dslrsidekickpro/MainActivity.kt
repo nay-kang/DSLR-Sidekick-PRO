@@ -1,194 +1,346 @@
 package net.codeedu.dslrsidekickpro
 
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
+import android.content.*
+import com.bumptech.glide.Glide
+import com.bumptech.glide.load.engine.DiskCacheStrategy
+import com.bumptech.glide.request.RequestOptions
+import androidx.exifinterface.media.ExifInterface
+import java.io.File
+import kotlinx.coroutines.*
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.Build
 import android.os.Bundle
-import android.graphics.BitmapFactory
-import android.widget.ImageView
+import android.os.IBinder
+import android.provider.MediaStore
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.viewpager2.widget.ViewPager2
+import java.io.ByteArrayInputStream
+import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
+import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
+import java.security.MessageDigest
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
+import com.google.mlkit.vision.face.FaceLandmark
+import kotlinx.coroutines.tasks.await
+
+class CenterCropRegionTransformation(private val targetPoint: android.graphics.Point? = null) : BitmapTransformation() {
+    override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
+        val centerX: Int
+        val centerY: Int
+
+        if (targetPoint != null) {
+            centerX = targetPoint.x
+            centerY = targetPoint.y
+        } else {
+            centerX = toTransform.width / 2
+            centerY = toTransform.height / 2
+        }
+
+        val left = (centerX - outWidth / 2).coerceIn(0, (toTransform.width - outWidth).coerceAtLeast(0))
+        val top = (centerY - outHeight / 2).coerceIn(0, (toTransform.height - outHeight).coerceAtLeast(0))
+        val width = outWidth.coerceAtMost(toTransform.width)
+        val height = outHeight.coerceAtMost(toTransform.height)
+        
+        return Bitmap.createBitmap(toTransform, left, top, width, height)
+    }
+
+    override fun updateDiskCacheKey(messageDigest: MessageDigest) {
+        messageDigest.update("eye_crop_100_v1".toByteArray())
+        targetPoint?.let { 
+            messageDigest.update(it.x.toString().toByteArray())
+            messageDigest.update(it.y.toString().toByteArray())
+        }
+    }
+}
 
 class MainActivity : AppCompatActivity() {
 
-    private val ACTION_USB_PERMISSION = "net.codeedu.dslrsidekickpro.USB_PERMISSION"
-    private lateinit var usbManager: UsbManager
-    private lateinit var statusTextView: TextView
-    private lateinit var photoImageView: ImageView
+    private lateinit var statusBarStatus: TextView
+    private lateinit var connectionIndicator: View
+    private lateinit var exifInfoTextView: TextView
+    private lateinit var photoViewPager: ViewPager2
+    private lateinit var focusCheckImageView: android.widget.ImageView
+    private lateinit var btnGallery: Button
+    
+    private var currentPhotoPath: String? = null
+    private val allPhotos = mutableListOf<String>()
+    private var currentPhotoIndex = -1
+    private lateinit var pagerAdapter: PhotoPagerAdapter
+
+    private var cameraService: CameraService? = null
+    private var isBound = false
+
+    private val faceDetector by lazy {
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .build()
+        FaceDetection.getClient(options)
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as CameraService.CameraBinder
+            cameraService = binder.getService()
+            isBound = true
+            cameraService?.addListener(cameraListener)
+        }
+        override fun onServiceDisconnected(name: ComponentName?) {
+            cameraService?.removeListener(cameraListener)
+            cameraService = null
+            isBound = false
+        }
+    }
+
+    private val mainScope = CoroutineScope(Dispatchers.Main + Job())
+
+    private val cameraListener = object : CameraService.CameraEventListener {
+        override fun onStatusUpdate(text: String, isConnected: Boolean?) {
+            updateStatus(text, isConnected)
+        }
+        override fun onNewPhoto(path: String) {
+            runOnUiThread {
+                allPhotos.add(0, path)
+                pagerAdapter.notifyItemInserted(0)
+                if (photoViewPager.currentItem == 0) {
+                    photoViewPager.setCurrentItem(0, true)
+                }
+                updateDetailViews(path)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        
+        enableImmersiveMode()
 
-        statusTextView = findViewById(R.id.statusTextView)
-        photoImageView = findViewById(R.id.photoImageView)
-        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-
-        // 验证 JNI 是否工作
-        try {
-            val versionInfo = stringFromJNI()
-            statusTextView.text = "Native Lib Loaded: $versionInfo\nWaiting for Camera..."
-        } catch (e: Exception) {
-            statusTextView.text = "JNI Error: ${e.message}"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
 
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(usbReceiver, filter)
-        }
-
-        findAndConnectCamera()
-    }
-
-    private fun findAndConnectCamera() {
-        val deviceList = usbManager.deviceList
-        android.util.Log.i("DSLRSidekick", "Found ${deviceList.size} USB devices")
-        if (deviceList.isEmpty()) {
-            statusTextView.text = "No USB Device Found"
-            return
-        }
-
-        for (device in deviceList.values) {
-            android.util.Log.i("DSLRSidekick", "Device: ${device.deviceName}, VID: ${device.vendorId}, PID: ${device.productId}")
-            if (usbManager.hasPermission(device)) {
-                android.util.Log.i("DSLRSidekick", "Already has permission, connecting...")
-                openAndConnect(device)
-            } else {
-                android.util.Log.i("DSLRSidekick", "Requesting permission...")
-                requestPermission(device)
-            }
-            // 暂时只处理第一个设备
-            return
-        }
-    }
-
-    private fun openAndConnect(device: UsbDevice) {
-        val connection = usbManager.openDevice(device)
-        if (connection != null) {
-            val fd = connection.fileDescriptor
-            statusTextView.text = "USB Connected! FD: $fd\nInitializing libgphoto2..."
+        val rootLayout = findViewById<View>(R.id.sidePanel).parent as View
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val displayCutout = insets.displayCutout
             
-            // 使用线程处理耗时操作
-            Thread {
-                val result = connectToCamera(fd)
-                runOnUiThread {
-                    if (result == 0) {
-                        statusTextView.text = "Connected! Ready for auto-import."
-                        startEventPolling()
-                    } else {
-                        statusTextView.text = "Connection failed: $result"
-                    }
-                }
-            }.start()
-        } else {
-            statusTextView.text = "Failed to open USB device"
+            val top = systemBars.top + (displayCutout?.safeInsetTop ?: 0)
+            val bottom = systemBars.bottom + (displayCutout?.safeInsetBottom ?: 0)
+            
+            findViewById<View>(R.id.sidePanel).setPadding(0, top, 0, bottom)
+            
+            val statusBarView = findViewById<View>(R.id.statusBar)
+            val params = statusBarView.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+            params.bottomMargin = bottom + 16.dpToPx()
+            statusBarView.layoutParams = params
+            
+            insets
+        }
+
+        statusBarStatus = findViewById(R.id.statusBarStatus)
+        connectionIndicator = findViewById(R.id.connectionIndicator)
+        exifInfoTextView = findViewById(R.id.exifInfoTextView)
+        photoViewPager = findViewById(R.id.photoViewPager)
+        focusCheckImageView = findViewById(R.id.focusCheckImageView)
+        btnGallery = findViewById(R.id.btnGallery)
+
+        btnGallery.setOnClickListener {
+            finish()
+        }
+
+        setupViewPager()
+
+        val serviceIntent = Intent(this, CameraService::class.java)
+        bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
+
+        loadAllPhotos()
+        
+        val photoPath = intent.getStringExtra("photo_path")
+        if (photoPath != null) {
+            currentPhotoPath = photoPath
+            currentPhotoIndex = allPhotos.indexOf(photoPath)
+            if (currentPhotoIndex != -1) {
+                photoViewPager.setCurrentItem(currentPhotoIndex, false)
+                updateDetailViews(photoPath)
+            }
         }
     }
 
-    private fun startEventPolling() {
-        android.util.Log.i("DSLRSidekick", "Starting hardware event listener...")
-        Thread {
-            while (true) {
-                // 阻塞等待相机事件 (Timeout 1000ms)
-                val fullPath = pollEvent(1000)
-                
-                if (fullPath != null) {
-                    android.util.Log.i("DSLRSidekick", "EVENT: $fullPath")
+    private fun setupViewPager() {
+        pagerAdapter = PhotoPagerAdapter(allPhotos) { _ -> }
+        photoViewPager.adapter = pagerAdapter
+        photoViewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                currentPhotoIndex = position
+                val path = allPhotos[position]
+                currentPhotoPath = path
+                updateDetailViews(path)
+            }
+        })
+    }
+
+    private fun loadAllPhotos() {
+        allPhotos.clear()
+        val projection = arrayOf(MediaStore.Images.Media.DATA)
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
+        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
+
+        contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            selectionArgs,
+            sortOrder
+        )?.use { cursor ->
+            val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+            while (cursor.moveToNext()) {
+                allPhotos.add(cursor.getString(index))
+            }
+        }
+    }
+
+    private fun updateDetailViews(path: String) {
+        val file = File(path)
+        if (!file.exists()) return
+
+        mainScope.launch {
+            // 1. 获取 EXIF 
+            val exifData = withContext(Dispatchers.IO) {
+                try {
+                    val exif = ExifInterface(path)
+                    val aperture = exif.getAttribute(ExifInterface.TAG_F_NUMBER) ?: "--"
+                    val shutter = exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: "--"
+                    val iso = exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS) ?: "--"
+                    "f/$aperture   ${formatShutter(shutter)}s   ISO $iso"
+                } catch (e: Exception) {
+                    "--   --   --"
+                }
+            }
+            exifInfoTextView.text = exifData
+            updateStatus("Finding Eyes...")
+
+            // 2. ML Kit 人眼精确检测
+            val eyePoint = withContext(Dispatchers.IO) {
+                try {
+                    // 使用缩略图进行检测以节省内存和时间，D610 的全分辨率图太大了
+                    val options = BitmapFactory.Options().apply {
+                        inSampleSize = 4 // 缩小 4 倍检测
+                    }
+                    val bitmap = BitmapFactory.decodeFile(path, options) ?: return@withContext null
+                    val image = InputImage.fromBitmap(bitmap, 0)
+                    val faces = faceDetector.process(image).await()
                     
-                    val lastSlash = fullPath.lastIndexOf('/')
-                    if (lastSlash != -1) {
-                        val folder = fullPath.substring(0, lastSlash)
-                        val fileName = fullPath.substring(lastSlash + 1)
-                        val ext = fileName.lowercase()
-                        
-                        // 过滤 JPG 文件进行实时预览
-                        if (ext.endsWith(".jpg")) {
-                            runOnUiThread {
-                                statusTextView.text = "New Photo: $fileName. Downloading..."
-                            }
-                            
-                            val startTime = System.currentTimeMillis()
-                            // 直接在当前轮询线程执行下载，确保 libgphoto2 访问安全（非线程安全）
-                            val imageData = downloadFile(folder, fileName)
-                            val duration = System.currentTimeMillis() - startTime
-                            
-                            if (imageData != null && imageData.isNotEmpty()) {
-                                val fullBitmap = BitmapFactory.decodeByteArray(imageData, 0, imageData.size)
-                                if (fullBitmap != null) {
-                                    runOnUiThread {
-                                        photoImageView.setImageBitmap(fullBitmap)
-                                        statusTextView.text = "Synced: $fileName (${imageData.size / 1024} KB) in ${duration}ms"
-                                    }
-                                } else {
-                                    runOnUiThread { statusTextView.text = "Error: Failed to decode image." }
-                                }
-                            } else {
-                                runOnUiThread { statusTextView.text = "Error: Download failed from camera." }
-                            }
-                        }
+                    val face = faces.firstOrNull() ?: return@withContext null
+                    
+                    val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)
+                    val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)
+                    
+                    val targetLandmark = leftEye ?: rightEye
+                    targetLandmark?.position?.let { 
+                        // 将缩略图坐标还原回原图坐标
+                        android.graphics.Point(it.x.toInt() * 4, it.y.toInt() * 4)
                     }
+                } catch (e: Exception) {
+                    null
                 }
             }
-        }.start()
+
+            // 3. 加载 100% 细节图
+            Glide.with(this@MainActivity)
+                .asBitmap()
+                .load(path)
+                .override(com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
+                .transform(CenterCropRegionTransformation(eyePoint))
+                .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // 缓存处理后的图
+                .into(focusCheckImageView)
+            
+            updateStatus("Viewing: ${file.name}")
+        }
     }
 
-    private fun requestPermission(device: UsbDevice) {
-        val permissionIntent = PendingIntent.getBroadcast(
-            this, 0, Intent(ACTION_USB_PERMISSION), 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
-        )
-        usbManager.requestPermission(device, permissionIntent)
+    override fun onDestroy() {
+        super.onDestroy()
+        mainScope.cancel()
+        faceDetector.close()
+        if (isBound) {
+            cameraService?.removeListener(cameraListener)
+            unbindService(serviceConnection)
+        }
     }
 
-    private val usbReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val action = intent.action
-            if (ACTION_USB_PERMISSION == action) {
-                synchronized(this) {
-                    val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
-                    }
-
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        device?.let { openAndConnect(it) }
-                    } else {
-                        statusTextView.text = "Permission Denied"
-                    }
-                }
+    private fun updateStatus(text: String, isConnected: Boolean? = null) {
+        runOnUiThread {
+            statusBarStatus.text = text
+            isConnected?.let {
+                connectionIndicator.setBackgroundColor(
+                    if (it) android.graphics.Color.GREEN else android.graphics.Color.RED
+                )
             }
         }
     }
 
-    /**
-     * Native methods
-     */
-    external fun stringFromJNI(): String
-    external fun connectToCamera(fd: Int): Int
-    external fun pollEvent(timeoutMs: Int): String?
-    external fun downloadThumbnail(folderPath: String, fileName: String): ByteArray?
-    external fun listFoldersInFolder(folderPath: String): Array<String>?
-    external fun listFilesInFolder(folderPath: String): Array<String>?
-    external fun downloadFile(folderPath: String, fileName: String): ByteArray?
-    external fun captureImage(): Int
-    external fun getSummary(): String
-    external fun getConfig(key: String): String
-    external fun setConfig(key: String, value: String): Int
-    external fun capturePreview(): ByteArray?
-
-    companion object {
-        init {
-            System.loadLibrary("gphoto2")
-            System.loadLibrary("usb")
+    private fun enableImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            val controller = window.insetsController
+            if (controller != null) {
+                controller.hide(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
         }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            enableImmersiveMode()
+        }
+    }
+
+    private fun formatShutter(shutter: String): String {
+        return try {
+            val s = shutter.toDouble()
+            if (s < 1.0) {
+                val denom = Math.round(1.0 / s)
+                "1/$denom"
+            } else {
+                s.toString()
+            }
+        } catch (e: Exception) { shutter }
+    }
+
+    private fun rotateBitmapByExif(bitmap: Bitmap, orientation: Int): Bitmap {
+        val matrix = Matrix()
+        when (orientation) {
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            else -> return bitmap
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
+
+    private fun Int.dpToPx(): Int {
+        return (this * resources.displayMetrics.density).toInt()
     }
 }

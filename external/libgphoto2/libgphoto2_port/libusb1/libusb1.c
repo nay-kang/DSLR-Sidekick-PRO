@@ -125,17 +125,31 @@ static struct _GPPortExternalSysDevice {
 	libusb_device *dl[1];
 } external_sys_device = { NULL, NULL, NULL, { NULL } };
 
+static int last_external_fd = -1;
+
 static int has_external_fd()
 {
-	if (gp_port_usb_get_sys_device() == -1)
+    int current_fd = gp_port_usb_get_sys_device();
+	if (current_fd == -1)
 		return 0;
+
+    // 如果 FD 变了，我们需要清理旧的句柄
+    if (last_external_fd != -1 && last_external_fd != current_fd) {
+        if (external_sys_device.h) {
+            libusb_close(external_sys_device.h);
+            external_sys_device.h = NULL;
+        }
+    }
+    last_external_fd = current_fd;
+
 	if (external_sys_device.h)
 		return 1;
-#ifdef HAVE_LIBUSB_OPTION_NO_DEVICE_DISCOVERY
+
+#ifdef LIBUSB_OPTION_NO_DEVICE_DISCOVERY
 	libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
 #endif
-	C_LIBUSB (libusb_init (&external_sys_device.ctx), GP_ERROR_IO);
-	LOG_ON_LIBUSB_E(libusb_wrap_sys_device(external_sys_device.ctx, gp_port_usb_get_sys_device(), &external_sys_device.h));
+	if (libusb_init (&external_sys_device.ctx) < 0) return 0;
+	if (libusb_wrap_sys_device(external_sys_device.ctx, current_fd, &external_sys_device.h) < 0) return 0;
 	external_sys_device.d = libusb_get_device(external_sys_device.h);
 	external_sys_device.dl[0] = external_sys_device.d;
 	return 1;
@@ -397,12 +411,21 @@ static int gp_libusb1_init (GPPort *port)
 
 	port->pl->config = port->pl->interface = port->pl->altsetting = -1;
 
-#ifdef  HAVE_LIBUSB_WRAP_SYS_DEVICE
+#ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
 	if (has_external_fd()) {
+        if (!external_sys_device.ctx) {
+#ifdef LIBUSB_OPTION_NO_DEVICE_DISCOVERY
+            libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
+#endif
+            libusb_init(&external_sys_device.ctx);
+        }
 		port->pl->ctx = external_sys_device.ctx;
 	} else
 #endif
 	{
+#ifdef LIBUSB_OPTION_NO_DEVICE_DISCOVERY
+        libusb_set_option(NULL, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, NULL);
+#endif
 		if (LOG_ON_LIBUSB_E (libusb_init (&port->pl->ctx))) {
 			free (port->pl);
 			port->pl = NULL;
@@ -423,6 +446,12 @@ static int
 gp_libusb1_exit (GPPort *port)
 {
 	if (port->pl) {
+#ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
+        if (external_sys_device.h) {
+            libusb_close(external_sys_device.h);
+            external_sys_device.h = NULL;
+        }
+#endif
 		free (port->pl->descs);
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 		if (port->pl->logfd >=0) close (port->pl->logfd);
@@ -457,24 +486,26 @@ gp_libusb1_open (GPPort *port)
 	GP_LOG_D ("()");
 	C_PARAMS (port);
 
-	if (!port->pl->d) {
-		gp_libusb1_find_path_lib(port);
-		C_PARAMS (port->pl->d);
-	}
-
 #ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
 	if (gp_port_usb_get_sys_device() != -1) {
 		if (!external_sys_device.h) {
-			LOG_ON_LIBUSB_E(libusb_wrap_sys_device(port->pl->ctx, gp_port_usb_get_sys_device(), &external_sys_device.h));
-			libusb_ref_device(libusb_get_device(external_sys_device.h));
+			libusb_wrap_sys_device(port->pl->ctx, gp_port_usb_get_sys_device(), &external_sys_device.h);
 		}
 		port->pl->dh = external_sys_device.h;
 		port->pl->d = libusb_get_device(external_sys_device.h);
-	} else
+        // 关键：即使有了 d，也要调用 find_path 以发现端点
+        gp_libusb1_find_path_lib(port);
+	}
 #endif
-	{
+
+	if (!port->pl->d) {
+		gp_libusb1_find_path_lib(port);
+	}
+
+	if (!port->pl->dh) {
 		C_LIBUSB (libusb_open (port->pl->d, &port->pl->dh), GP_ERROR_IO);
 	}
+
 	if (!port->pl->dh) {
 		int saved_errno = errno;
 		gp_port_set_error (port, _("Could not open USB device (%s)."),
@@ -482,16 +513,14 @@ gp_libusb1_open (GPPort *port)
 		return GP_ERROR_IO;
 	}
 
+	GP_LOG_D ("claiming interface %d", port->settings.usb.interface);
+    GP_LOG_D ("endpoints: in=0x%02x, out=0x%02x, int=0x%02x",
+              port->settings.usb.inep, port->settings.usb.outep, port->settings.usb.intep);
+
+    // Android 上不要轻易调用 set_configuration，因为系统通常已经做好了
+    // 只有在非 Android 模式下才考虑 kernel driver detach
+#ifndef HAVE_LIBUSB_WRAP_SYS_DEVICE
 	ret = libusb_kernel_driver_active (port->pl->dh, port->settings.usb.interface);
-
-#if 0
-	if (strstr(name,"usbfs") || strstr(name,"storage")) {
-		/* other gphoto instance most likely */
-		gp_port_set_error (port, _("Camera is already in use."));
-		return GP_ERROR_IO_LOCK;
-	}
-#endif
-
 	switch (ret) {
 	case 1: GP_LOG_D ("Device has a kernel driver attached (%d), detaching it now.", ret);
 		ret = libusb_detach_kernel_driver (port->pl->dh, port->settings.usb.interface);
@@ -505,8 +534,8 @@ gp_libusb1_open (GPPort *port)
 		gp_port_set_error (port, _("Could not query kernel driver of device."));
 		break;
 	}
+#endif
 
-	GP_LOG_D ("claiming interface %d", port->settings.usb.interface);
 	if (LOG_ON_LIBUSB_E (libusb_claim_interface (port->pl->dh, port->settings.usb.interface))) {
 		int saved_errno = errno;
 		gp_port_set_error (port, _("Could not claim interface %d (%s). "
@@ -528,6 +557,10 @@ gp_libusb1_open (GPPort *port)
 				   "sdc2xx, stv680, spca50x");
 		return GP_ERROR_IO_USB_CLAIM;
 	}
+
+    // 清除端点停顿，这在 Android 上对 Nikon 特别有效
+    if (port->settings.usb.inep != -1) libusb_clear_halt(port->pl->dh, port->settings.usb.inep);
+    if (port->settings.usb.outep != -1) libusb_clear_halt(port->pl->dh, port->settings.usb.outep);
 
 	ret = gp_libusb1_queue_interrupt_urbs (port);
 	if (ret)
@@ -802,11 +835,13 @@ gp_libusb1_queue_interrupt_urbs (GPPort *port)
 			buf, INTERRUPT_BUFFER_SIZE, _cb_irq, port->pl, 0
 		);
 		port->pl->transfers[i]->flags |= LIBUSB_TRANSFER_FREE_BUFFER;
-		ret = LOG_ON_LIBUSB_E(libusb_submit_transfer (port->pl->transfers[i]));
+		ret = libusb_submit_transfer (port->pl->transfers[i]);
 		if (ret < LIBUSB_SUCCESS) {
+			GP_LOG_E ("Failed to submit interrupt URB: %d (%s). Continuing anyway.", ret, libusb_error_name(ret));
 			libusb_free_transfer (port->pl->transfers[i]);
 			port->pl->transfers[i] = NULL;
-			return translate_libusb_error(ret, GP_ERROR_IO);
+			// 关键修改：在 Android 上，中断端点失败不应导致全局初始化失败
+			continue;
 		}
 		port->pl->nrofactiveinttransfers++;
 	}
@@ -1141,16 +1176,27 @@ gp_libusb1_find_first_altsetting(struct libusb_device *dev, int *config, int *in
 		if (LOG_ON_LIBUSB_E (libusb_get_config_descriptor (dev, i, &confdesc)))
 			return -1;
 
-		for (i1 = 0; i1 < confdesc->bNumInterfaces; i1++)
-			for (i2 = 0; i2 < confdesc->interface[i1].num_altsetting; i2++)
-				if (confdesc->interface[i1].altsetting[i2].bNumEndpoints) {
+		for (i1 = 0; i1 < confdesc->bNumInterfaces; i1++) {
+			for (i2 = 0; i2 < confdesc->interface[i1].num_altsetting; i2++) {
+                // 特别针对 PTP 设备：寻找具有 3 个端点（Bulk IN, Bulk OUT, Interrupt IN）的接口
+                if (confdesc->interface[i1].altsetting[i2].bInterfaceClass == LIBUSB_CLASS_PTP ||
+                    confdesc->interface[i1].altsetting[i2].bInterfaceClass == 0x06 /* Still Image */) {
 					*config = i;
 					*interface = i1;
 					*altsetting = i2;
 					libusb_free_config_descriptor (confdesc);
+					return 0;
+                }
 
+				if (confdesc->interface[i1].altsetting[i2].bNumEndpoints >= 2) {
+					*config = i;
+					*interface = i1;
+					*altsetting = i2;
+					libusb_free_config_descriptor (confdesc);
 					return 0;
 				}
+            }
+        }
 		libusb_free_config_descriptor (confdesc);
 	}
 	return -1;
@@ -1164,6 +1210,36 @@ gp_libusb1_find_path_lib(GPPort *port)
 	GPPortPrivateLibrary *pl;
 
 	C_PARAMS (port);
+	pl = port->pl;
+
+#ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
+	if (gp_port_usb_get_sys_device() != -1) {
+		GP_LOG_D ("Android FD detected, performing endpoint discovery on wrapped device.");
+        if (!pl->d) {
+            if (external_sys_device.h) pl->d = libusb_get_device(external_sys_device.h);
+            else return GP_ERROR_IO;
+        }
+
+        int config = -1, interface = -1, altsetting = -1;
+        struct libusb_config_descriptor *confdesc;
+
+        gp_libusb1_find_first_altsetting(pl->d, &config, &interface, &altsetting);
+        if (LOG_ON_LIBUSB_E (libusb_get_config_descriptor (pl->d, config, &confdesc)))
+            return GP_ERROR_IO;
+
+        port->settings.usb.config = confdesc->bConfigurationValue;
+        port->settings.usb.interface = confdesc->interface[interface].altsetting[altsetting].bInterfaceNumber;
+        port->settings.usb.altsetting = confdesc->interface[interface].altsetting[altsetting].bAlternateSetting;
+
+        port->settings.usb.inep  = gp_libusb1_find_ep(pl->d, config, interface, altsetting, LIBUSB_ENDPOINT_IN, LIBUSB_TRANSFER_TYPE_BULK);
+        port->settings.usb.outep = gp_libusb1_find_ep(pl->d, config, interface, altsetting, LIBUSB_ENDPOINT_OUT, LIBUSB_TRANSFER_TYPE_BULK);
+        port->settings.usb.intep = gp_libusb1_find_ep(pl->d, config, interface, altsetting, LIBUSB_ENDPOINT_IN, LIBUSB_TRANSFER_TYPE_INTERRUPT);
+
+        port->settings.usb.maxpacketsize = libusb_get_max_packet_size (pl->d, port->settings.usb.inep);
+        libusb_free_config_descriptor(confdesc);
+        return GP_OK;
+	}
+#endif
 
 	pl = port->pl;
 
@@ -1525,6 +1601,13 @@ gp_libusb1_find_device_by_class_lib(GPPort *port, int class, int subclass, int p
 	GPPortPrivateLibrary *pl;
 
 	C_PARAMS (port);
+
+#ifdef HAVE_LIBUSB_WRAP_SYS_DEVICE
+	if (gp_port_usb_get_sys_device() != -1) {
+		GP_LOG_D ("Android FD detected, skipping find_device_by_class_lib.");
+		return GP_OK;
+	}
+#endif
 
 	pl = port->pl;
 

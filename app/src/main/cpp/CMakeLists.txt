@@ -63,6 +63,9 @@ add_library(gphoto2 SHARED
         ${EXTERNAL_DIR}/libgphoto2/camlibs/ptp2/fujiptpip.c
         ${EXTERNAL_DIR}/libgphoto2/camlibs/ptp2/ptpip.c
         ${EXTERNAL_DIR}/libgphoto2/camlibs/ptp2/chdk.c
+
+        # ltdl stub
+        ltdl_stub.c
 )
 
 # 宏定义
