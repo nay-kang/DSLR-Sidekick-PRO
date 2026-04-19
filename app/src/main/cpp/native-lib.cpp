@@ -60,8 +60,10 @@ Java_net_codeedu_dslrsidekickpro_CameraService_connectToCamera(JNIEnv *env, jobj
     // Inject Nikon D610 Capabilities
     CameraAbilities ab;
     memset(&ab, 0, sizeof(ab));
-    strcpy(ab.model, "Nikon DSC D610 (PTP mode)");
-    strcpy(ab.library, "ptp2");
+    strncpy(ab.model, "Nikon DSC D610 (PTP mode)", sizeof(ab.model) - 1);
+    ab.model[sizeof(ab.model) - 1] = '\0';  // 确保null终止
+    strncpy(ab.library, "ptp2", sizeof(ab.library) - 1);
+    ab.library[sizeof(ab.library) - 1] = '\0';  // 确保null终止
     ab.status = GP_DRIVER_STATUS_PRODUCTION;
     ab.operations = (CameraOperation)(GP_OPERATION_CAPTURE_IMAGE | GP_OPERATION_CONFIG | GP_OPERATION_CAPTURE_PREVIEW);
     ab.file_operations = (CameraFileOperation)(GP_FILE_OPERATION_DELETE | GP_FILE_OPERATION_PREVIEW | GP_FILE_OPERATION_EXIF);

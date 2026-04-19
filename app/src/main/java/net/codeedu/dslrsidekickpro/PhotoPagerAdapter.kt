@@ -1,19 +1,14 @@
 package net.codeedu.dslrsidekickpro
 
-import android.graphics.BitmapFactory
-import android.graphics.Matrix
 import android.view.LayoutInflater
 import android.view.ViewGroup
-import androidx.exifinterface.media.ExifInterface
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.github.chrisbanes.photoview.PhotoView
-import java.io.File
 
 class PhotoPagerAdapter(
-    private val photos: MutableList<String>,
-    private val onPhotoVisible: (String) -> Unit
+    private val photos: MutableList<String>
 ) : RecyclerView.Adapter<PhotoPagerAdapter.ViewHolder>() {
 
     class ViewHolder(val photoView: PhotoView) : RecyclerView.ViewHolder(photoView)
@@ -33,6 +28,12 @@ class PhotoPagerAdapter(
             .diskCacheStrategy(DiskCacheStrategy.NONE) // 摄影工作流通常不需要磁盘缓存，直接读文件更准
             .skipMemoryCache(false)
             .into(holder.photoView)
+    }
+
+    override fun onViewRecycled(holder: ViewHolder) {
+        super.onViewRecycled(holder)
+        // 清理缓存以释放内存
+        Glide.with(holder.photoView.context).clear(holder.photoView)
     }
 
     override fun getItemCount() = photos.size

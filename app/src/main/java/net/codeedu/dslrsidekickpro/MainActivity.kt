@@ -3,13 +3,12 @@ package net.codeedu.dslrsidekickpro
 import android.content.*
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
-import com.bumptech.glide.request.RequestOptions
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import kotlinx.coroutines.*
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Matrix
+// ...
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -22,7 +21,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.viewpager2.widget.ViewPager2
-import java.io.ByteArrayInputStream
 import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
 import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
 import java.security.MessageDigest
@@ -31,6 +29,8 @@ import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.tasks.await
+import android.util.Log
+import android.net.Uri
 
 class CenterCropRegionTransformation(private val targetPoint: android.graphics.Point? = null) : BitmapTransformation() {
     override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
@@ -107,14 +107,34 @@ class MainActivity : AppCompatActivity() {
         override fun onStatusUpdate(text: String, isConnected: Boolean?) {
             updateStatus(text, isConnected)
         }
-        override fun onNewPhoto(path: String) {
+
+        override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
             runOnUiThread {
-                allPhotos.add(0, path)
-                pagerAdapter.notifyItemInserted(0)
-                if (photoViewPager.currentItem == 0) {
-                    photoViewPager.setCurrentItem(0, true)
+                val displayPath = realPath ?: uri.toString()
+                // 检查path是否已存在，避免重复
+                if (!allPhotos.contains(displayPath)) {
+                    allPhotos.add(0, displayPath)
+                    pagerAdapter.notifyItemInserted(0)
                 }
-                updateDetailViews(path)
+                // 仅当是实时拍照事件时，自动切换到详情视图并更新 detail
+                if (fromLiveEvent) {
+                    photoViewPager.setCurrentItem(0, true)
+                    updateDetailViews(displayPath)
+                }
+            }
+        }
+
+        override fun onSyncProgress(current: Int, total: Int) {
+            runOnUiThread {
+                val msg = if (total > 0) "Syncing photos: $current / $total" else "Syncing photos: $current"
+                updateStatus(msg, null)
+            }
+        }
+
+        override fun onSyncCompleted(total: Int) {
+            runOnUiThread {
+                val msg = if (total >= 0) "Sync completed: $total new photos" else "Sync completed"
+                updateStatus(msg, null)
             }
         }
     }
@@ -178,7 +198,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupViewPager() {
-        pagerAdapter = PhotoPagerAdapter(allPhotos) { _ -> }
+        pagerAdapter = PhotoPagerAdapter(allPhotos)
         photoViewPager.adapter = pagerAdapter
         photoViewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
@@ -212,61 +232,72 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateDetailViews(path: String) {
-        val file = File(path)
-        if (!file.exists()) return
+        val isContent = path.startsWith("content://") || path.startsWith("file://")
+        val file = if (!isContent) File(path) else null
+        if (!isContent && (file == null || !file.exists())) return
 
         mainScope.launch {
-            // 1. 获取 EXIF 
+            // 1. 获取 EXIF
             val exifData = withContext(Dispatchers.IO) {
                 try {
-                    val exif = ExifInterface(path)
-                    val aperture = exif.getAttribute(ExifInterface.TAG_F_NUMBER) ?: "--"
-                    val shutter = exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: "--"
-                    val iso = exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS) ?: "--"
+                    val exif = if (isContent) {
+                        val uri = Uri.parse(path)
+                        contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
+                    } else {
+                        ExifInterface(path)
+                    }
+                    val aperture = exif?.getAttribute(ExifInterface.TAG_F_NUMBER) ?: "--"
+                    val shutter = exif?.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: "--"
+                    val iso = exif?.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS) ?: "--"
                     "f/$aperture   ${formatShutter(shutter)}s   ISO $iso"
                 } catch (e: Exception) {
+                    Log.e("MainActivity", "EXIF read error", e)
                     "--   --   --"
                 }
             }
             exifInfoTextView.text = exifData
             updateStatus("Finding Eyes...")
 
-            // 2. ML Kit 人眼精确检测
+            // 2. ML Kit 人眼精确检测（使用缩略图以节省内存）
             val eyePoint = withContext(Dispatchers.IO) {
+                var bitmap: android.graphics.Bitmap? = null
                 try {
-                    // 使用缩略图进行检测以节省内存和时间，D610 的全分辨率图太大了
-                    val options = BitmapFactory.Options().apply {
-                        inSampleSize = 4 // 缩小 4 倍检测
+                    val options = BitmapFactory.Options().apply { inSampleSize = 4 }
+                    bitmap = if (isContent) {
+                        val uri = Uri.parse(path)
+                        contentResolver.openInputStream(uri)?.use { stream -> BitmapFactory.decodeStream(stream, null, options) }
+                    } else {
+                        BitmapFactory.decodeFile(path, options)
                     }
-                    val bitmap = BitmapFactory.decodeFile(path, options) ?: return@withContext null
+                    if (bitmap == null) return@withContext null
+
                     val image = InputImage.fromBitmap(bitmap, 0)
                     val faces = faceDetector.process(image).await()
-                    
                     val face = faces.firstOrNull() ?: return@withContext null
-                    
                     val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)
                     val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)
-                    
                     val targetLandmark = leftEye ?: rightEye
-                    targetLandmark?.position?.let { 
-                        // 将缩略图坐标还原回原图坐标
+                    targetLandmark?.position?.let {
                         android.graphics.Point(it.x.toInt() * 4, it.y.toInt() * 4)
                     }
                 } catch (e: Exception) {
+                    Log.e("MainActivity", "Eye detection error", e)
                     null
+                } finally {
+                    bitmap?.recycle()
                 }
             }
 
-            // 3. 加载 100% 细节图
+            // 3. 加载 100% 细节图（Glide 支持 content:// Uri）
             Glide.with(this@MainActivity)
                 .asBitmap()
                 .load(path)
                 .override(com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
                 .transform(CenterCropRegionTransformation(eyePoint))
-                .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // 缓存处理后的图
+                .diskCacheStrategy(DiskCacheStrategy.RESOURCE)
                 .into(focusCheckImageView)
-            
-            updateStatus("Viewing: ${file.name}")
+
+            updateStatus("Viewing: ${if (file != null) file.name else Uri.parse(path).lastPathSegment}")
         }
     }
 
@@ -318,26 +349,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatShutter(shutter: String): String {
-        return try {
-            val s = shutter.toDouble()
-            if (s < 1.0) {
-                val denom = Math.round(1.0 / s)
-                "1/$denom"
-            } else {
-                s.toString()
-            }
-        } catch (e: Exception) { shutter }
-    }
-
-    private fun rotateBitmapByExif(bitmap: Bitmap, orientation: Int): Bitmap {
-        val matrix = Matrix()
-        when (orientation) {
-            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
-            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
-            androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
-            else -> return bitmap
+        return if (shutter.contains("/")) {
+            shutter
+        } else {
+            "1/$shutter"
         }
-        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     }
 
     private fun Int.dpToPx(): Int {

@@ -32,6 +32,12 @@ class PhotoAdapter(
         holder.itemView.setOnClickListener { onClick(path) }
     }
 
+    override fun onViewRecycled(holder: ViewHolder) {
+        super.onViewRecycled(holder)
+        // 清理缓存的ImageView以释放内存
+        Glide.with(holder.imageView.context).clear(holder.imageView)
+    }
+
     override fun getItemCount() = photos.size
 
     fun addPhoto(path: String) {

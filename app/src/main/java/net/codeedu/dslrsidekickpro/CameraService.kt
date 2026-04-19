@@ -15,6 +15,9 @@ import androidx.core.app.NotificationCompat
 import android.content.ContentValues
 import android.provider.MediaStore
 import java.util.concurrent.Executors
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import android.net.Uri
 
 class CameraService : Service() {
 
@@ -24,11 +27,53 @@ class CameraService : Service() {
     private lateinit var usbManager: UsbManager
     
     private val binder = CameraBinder()
-    private val listeners = mutableListOf<CameraEventListener>()
+    // 使用 CopyOnWriteArrayList 确保线程安全，避免竞态条件
+    private val listeners = CopyOnWriteArrayList<CameraEventListener>()
 
     interface CameraEventListener {
         fun onStatusUpdate(text: String, isConnected: Boolean? = null)
-        fun onNewPhoto(path: String)
+        /**
+         * Notify listener of a new photo saved to gallery.
+         * @param uri content Uri for the saved image (always provided)
+         * @param realPath real filesystem path when available (may be null on scoped storage)
+         * @param fromLiveEvent true when photo came from a live camera event (shutter press),
+         *                      false when photo came from a batch sync.
+         */
+        fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean)
+
+        /**
+         * Sync progress callbacks. total may be -1 if unknown.
+         */
+        fun onSyncProgress(current: Int, total: Int)
+        fun onSyncCompleted(total: Int)
+    }
+
+    private fun countJpgFilesRecursive(path: String, existingFiles: MutableSet<String>, countedPaths: MutableSet<String>): Int {
+        if (!isCameraConnected) return 0
+        var total = 0
+        try {
+            val folders = listFoldersInFolder(path)
+            folders?.forEach { sub ->
+                if (!sub.startsWith(".") && sub != "MISC") {
+                    val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
+                    total += countJpgFilesRecursive(subPath, existingFiles, countedPaths)
+                }
+            }
+            val files = listFilesInFolder(path)
+            files?.filter { it.lowercase().endsWith(".jpg") }?.forEach { fileName ->
+                val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
+                if (countedPaths.contains(fullPathKey)) return@forEach
+                if (existingFiles.contains(fileName)) {
+                    countedPaths.add(fullPathKey)
+                    return@forEach
+                }
+                countedPaths.add(fullPathKey)
+                total++
+            }
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error counting folder: $path", e)
+        }
+        return total
     }
 
     inner class CameraBinder : Binder() {
@@ -39,17 +84,19 @@ class CameraService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+        usbManager = getSystemService(UsbManager::class.java) as UsbManager
         startForegroundService()
-        
+
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED) // Added for dynamic USB connection handling
+        @Suppress("UnspecifiedRegisterReceiverFlag")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(usbReceiver, filter, RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(usbReceiver, filter)
         }
-        
+
         findAndConnectCamera()
     }
 
@@ -91,11 +138,14 @@ class CameraService : Service() {
 
     private fun findAndConnectCamera() {
         val deviceList = usbManager.deviceList
+        // Keep detailed USB information at DEBUG level to avoid noisy production logs
+        Log.d("CameraService", "USB Device List: ${deviceList.values}")
         if (deviceList.isEmpty()) {
             updateStatus("No USB Device Found", false)
             return
         }
         for (device in deviceList.values) {
+            Log.d("CameraService", "Checking device: ${device.deviceName}")
             if (usbManager.hasPermission(device)) {
                 openAndConnect(device)
             } else {
@@ -107,30 +157,47 @@ class CameraService : Service() {
 
     private fun requestPermission(device: UsbDevice) {
         val permissionIntent = PendingIntent.getBroadcast(
-            this, 0, Intent(ACTION_USB_PERMISSION), 
+            this, 0, Intent(ACTION_USB_PERMISSION),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
         )
         usbManager.requestPermission(device, permissionIntent)
     }
 
     private fun openAndConnect(device: UsbDevice) {
-        usbDeviceConnection?.close()
-        usbDeviceConnection = usbManager.openDevice(device)
-        val connection = usbDeviceConnection
-        if (connection != null) {
-            val fd = connection.fileDescriptor
-            Thread {
-                val result = connectToCamera(fd)
-                if (result == 0) {
-                    isCameraConnected = true
-                    updateStatus("Connected! Syncing...", true)
-                    syncAllPhotos()
-                    startEventPolling()
-                } else {
-                    isCameraConnected = false
-                    updateStatus("Connection failed: $result", false)
-                }
-            }.start()
+        try {
+            usbDeviceConnection?.close()
+            usbDeviceConnection = usbManager.openDevice(device)
+            val connection = usbDeviceConnection
+            if (connection != null) {
+                val fd = connection.fileDescriptor
+                Thread {
+                    var result = connectToCamera(fd)
+                    var retryCount = 0
+
+                    // 重试逻辑：最多重试2次
+                    while (result != 0 && retryCount < 2 && isCameraConnected.not()) {
+                        Log.w("CameraService", "Connection failed, retrying... (attempt ${retryCount + 2})")
+                        Thread.sleep(1000)
+                        result = connectToCamera(fd)
+                        retryCount++
+                    }
+
+                    if (result == 0) {
+                        isCameraConnected = true
+                        updateStatus("Connected! Syncing...", true)
+                        syncAllPhotos()
+                        startEventPolling()
+                    } else {
+                        isCameraConnected = false
+                        updateStatus("Connection failed after ${retryCount + 1} attempts (error: $result)", false)
+                    }
+                }.start()
+            } else {
+                updateStatus("Failed to open USB device", false)
+            }
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error in openAndConnect", e)
+            updateStatus("Connection error: ${e.message}", false)
         }
     }
 
@@ -159,60 +226,143 @@ class CameraService : Service() {
                 isCameraConnected = false
                 disconnectCameraNative()
                 updateStatus("Camera Disconnected", false)
+            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED == action) { // Handle USB device attachment
+                // USB attach is informational but verbose; log at DEBUG level
+                Log.d("CameraService", "USB Device Attached")
+                findAndConnectCamera()
             }
         }
     }
 
     private fun syncAllPhotos() {
-        if (!isCameraConnected) return
-        
+        if (!isCameraConnected) {
+            Log.w("CameraService", "Sync aborted: Camera not connected")
+            return
+        }
+
+            Log.i("CameraService", "Starting photo sync...")
         // Single thread executor for sync tasks to avoid concurrency issues with gphoto2 context
         val syncExecutor = Executors.newSingleThreadExecutor()
+        val downloadedCount = AtomicInteger(0)
         syncExecutor.execute {
             try {
                 // Give camera a moment to initialize internal storage
                 Thread.sleep(1500)
-                
+
                 val existingFiles = getExistingPublicPhotos()
-                Log.i("CameraService", "Existing photos in gallery: ${existingFiles.size}")
+                Log.d("CameraService", "Existing photos in gallery: ${existingFiles.size}")
+
+                // Tracks full camera paths already downloaded during this sync run to prevent duplicates
+                val downloadedPaths = mutableSetOf<String>()
+
+                // Pre-count total candidate JPGs to provide progress feedback
+                val countedPathsForCount = mutableSetOf<String>()
+                var totalCandidates = 0
+                try {
+                    totalCandidates += countJpgFilesRecursive("/DCIM", existingFiles, countedPathsForCount)
+                    val rootFolders = listFoldersInFolder("/") ?: emptyArray()
+                    rootFolders.forEach { store ->
+                        if (store.equals("DCIM", ignoreCase = true)) return@forEach
+                        val path = if (store.startsWith("/")) store else "/$store"
+                        totalCandidates += countJpgFilesRecursive(path, existingFiles, countedPathsForCount)
+                        totalCandidates += countJpgFilesRecursive("$path/DCIM", existingFiles, countedPathsForCount)
+                    }
+                } catch (e: Exception) {
+                    Log.e("CameraService", "Error counting files for progress", e)
+                }
+
+                // notify listeners sync started
+                listeners.forEach { it.onSyncProgress(0, if (totalCandidates > 0) totalCandidates else -1) }
 
                 // 1. Try common DCIM path
-                scanFolderRecursive("/DCIM", existingFiles)
+                scanFolderRecursive("/DCIM", existingFiles, downloadedPaths, downloadedCount, totalCandidates)
 
                 // 2. Scan root for storage volumes
                 val rootFolders = listFoldersInFolder("/") ?: emptyArray()
                 rootFolders.forEach { store ->
                     if (store.equals("DCIM", ignoreCase = true)) return@forEach
                     val path = if (store.startsWith("/")) store else "/$store"
-                    scanFolderRecursive(path, existingFiles)
-                    scanFolderRecursive("$path/DCIM", existingFiles)
+                    scanFolderRecursive(path, existingFiles, downloadedPaths, downloadedCount, totalCandidates)
+                    scanFolderRecursive("$path/DCIM", existingFiles, downloadedPaths, downloadedCount, totalCandidates)
                 }
             } catch (e: Exception) {
-                Log.e("CameraService", "Sync error", e)
+                    Log.e("CameraService", "Sync error", e)
+            } finally {
+                // 确保 executor 被关闭，防止资源泄漏
+                syncExecutor.shutdown()
+                Log.i("CameraService", "Photo sync completed")
+                try {
+                    listeners.forEach { it.onSyncCompleted(downloadedCount.get()) }
+                } catch (e: Exception) {
+                    Log.e("CameraService", "Error notifying sync completion", e)
+                }
             }
         }
     }
 
-    private fun scanFolderRecursive(path: String, existingFiles: Set<String>) {
+    private fun scanFolderRecursive(
+        path: String,
+        existingFiles: MutableSet<String>,
+        downloadedPaths: MutableSet<String>,
+        downloadedCount: AtomicInteger,
+        totalCount: Int
+    ) {
         if (!isCameraConnected) return
-        
-        val folders = listFoldersInFolder(path)
-        folders?.forEach { sub ->
-            if (!sub.startsWith(".") && sub != "MISC") {
-                val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
-                scanFolderRecursive(subPath, existingFiles)
-            }
-        }
 
-        val files = listFilesInFolder(path)
-        files?.filter { it.lowercase().endsWith(".jpg") }?.reversed()?.forEach { fileName ->
-            if (!existingFiles.contains(fileName)) {
-                Log.i("CameraService", "Syncing new file: $path/$fileName")
-                val data = downloadFile(path, fileName)
-                if (data != null) {
-                    saveToPublicGallery(fileName, data)
+        try {
+            val folders = listFoldersInFolder(path)
+            folders?.forEach { sub ->
+                if (!sub.startsWith(".") && sub != "MISC") {
+                    val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
+                    scanFolderRecursive(subPath, existingFiles, downloadedPaths, downloadedCount, totalCount)
                 }
             }
+
+            val files = listFilesInFolder(path)
+            files?.filter { it.lowercase().endsWith(".jpg") }?.reversed()?.forEach { fileName ->
+                // 添加连接检查，防止断开时继续操作
+                if (!isCameraConnected) return@forEach
+
+                val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
+
+                // Skip if this exact camera path was already downloaded in this run
+                if (downloadedPaths.contains(fullPathKey)) return@forEach
+
+                // Skip if a file with same display name already exists in gallery
+                if (existingFiles.contains(fileName)) {
+                    // Non-critical info — use DEBUG to avoid noisy logs in production
+                    Log.d("CameraService", "Skipping (already in gallery): $fileName")
+                    // still mark as downloaded path to avoid revisiting same camera file
+                    downloadedPaths.add(fullPathKey)
+                    return@forEach
+                }
+
+                // Per-file sync events are verbose; log at DEBUG level
+                Log.d("CameraService", "Syncing new file: $fullPathKey")
+                val data = downloadFileWithTimeout(path, fileName)
+                if (data != null) {
+                    val uri = saveToPublicGallery(fileName, data)
+                    if (uri != null) {
+                        // Add to existingFiles so further scans in this run won't re-download by name
+                        existingFiles.add(fileName)
+                        downloadedPaths.add(fullPathKey)
+
+                        val realPath = getRealPathFromURI(uri)
+                        // Notify listeners with the Uri and best-effort real path
+                        listeners.forEach { listener -> listener.onNewPhoto(uri, realPath, false) }
+
+                        // update progress
+                        try {
+                            val cur = downloadedCount.incrementAndGet()
+                            listeners.forEach { listener -> listener.onSyncProgress(cur, if (totalCount > 0) totalCount else -1) }
+                        } catch (e: Exception) {
+                            Log.e("CameraService", "Progress notify error", e)
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error scanning folder: $path", e)
         }
     }
 
@@ -230,20 +380,22 @@ class CameraService : Service() {
                         val folder = fullPath.substring(0, lastSlash)
                         val fileName = fullPath.substring(lastSlash + 1)
                         if (fileName.lowercase().endsWith(".jpg")) {
-                            val imageData = downloadFile(folder, fileName)
+                            // 添加超时机制下载文件
+                            val imageData = downloadFileWithTimeout(folder, fileName)
                             if (imageData != null) {
                                 val uri = saveToPublicGallery(fileName, imageData)
-                                uri?.let { 
+                                uri?.let {
                                     val realPath = getRealPathFromURI(it)
-                                    realPath?.let { p -> 
-                                        listeners.forEach { it.onNewPhoto(p) } 
-                                    }
+                                    listeners.forEach { listener -> listener.onNewPhoto(it, realPath, true) }
                                 }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("CameraService", "Polling error", e)
+                    if (isCameraConnected) {
+                        Log.e("CameraService", "Polling error", e)
+                    }
+                    if (!isCameraConnected) break
                 }
             }
         }
@@ -273,12 +425,13 @@ class CameraService : Service() {
             }
             return uri
         } catch (e: Exception) {
+            Log.e("CameraService", "Error saving to gallery", e)
             contentResolver.delete(uri, null, null)
             return null
         }
     }
 
-    private fun getExistingPublicPhotos(): Set<String> {
+    private fun getExistingPublicPhotos(): MutableSet<String> {
         val names = mutableSetOf<String>()
         val projection = arrayOf(MediaStore.Images.Media.DISPLAY_NAME)
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -300,20 +453,60 @@ class CameraService : Service() {
                     }
                 }
             }
-        } catch (e: Exception) {
-            Log.e("CameraService", "Error querying MediaStore", e)
+            } catch (e: Exception) {
+                Log.e("CameraService", "Error querying MediaStore", e)
         }
         return names
     }
 
     private fun getRealPathFromURI(uri: android.net.Uri): String? {
-        val projection = arrayOf(MediaStore.Images.Media.DATA)
-        contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            val columnIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-            cursor.moveToFirst()
-            return cursor.getString(columnIndex)
+        return try {
+            val projection = arrayOf(MediaStore.Images.Media.DATA)
+            contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val columnIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+                    cursor.getString(columnIndex)
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error getting real path from URI", e)
+            null
         }
-        return null
+    }
+
+    /**
+     * 带超时机制的文件下载包装方法
+     * @param folderPath 文件夹路径
+     * @param fileName 文件名
+     * @return 文件数据，或在超时/错误时返回null
+     */
+    private fun downloadFileWithTimeout(folderPath: String, fileName: String): ByteArray? {
+        val timeoutMs = 30000L
+        return try {
+            val startTime = System.currentTimeMillis()
+            var result: ByteArray? = null
+            val thread = Thread {
+                result = downloadFile(folderPath, fileName)
+            }
+            thread.start()
+            thread.join(timeoutMs)
+
+            if (thread.isAlive) {
+                Log.w("CameraService", "Download timeout for $folderPath/$fileName")
+                thread.interrupt()
+                return null
+            }
+
+            val elapsed = System.currentTimeMillis() - startTime
+            // Per-file download timing is verbose; keep at DEBUG level
+            Log.d("CameraService", "Downloaded $fileName in ${elapsed}ms")
+            result
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error downloading file with timeout", e)
+            null
+        }
     }
 
     external fun connectToCamera(fd: Int): Int

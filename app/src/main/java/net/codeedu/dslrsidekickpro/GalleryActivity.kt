@@ -1,20 +1,21 @@
 package net.codeedu.dslrsidekickpro
 
 import android.content.Intent
+import android.net.Uri
+import com.google.android.material.snackbar.Snackbar
 import android.os.Bundle
 import android.view.View
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import java.io.File
 import android.provider.MediaStore
 import android.os.Build
 import android.content.ComponentName
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.view.WindowManager
-import android.widget.Toast
+// ...
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -42,18 +43,46 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
+    private var syncSnackbar: Snackbar? = null
+
     private val cameraListener = object : CameraService.CameraEventListener {
         override fun onStatusUpdate(text: String, isConnected: Boolean?) {
             updateStatus(text, isConnected)
         }
 
-        override fun onNewPhoto(path: String) {
+        override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
             runOnUiThread {
-                adapter.addPhoto(path)
-                // 自动切换到详情模式
-                val intent = Intent(this@GalleryActivity, MainActivity::class.java)
-                intent.putExtra("photo_path", path)
-                startActivity(intent)
+                val displayPath = realPath ?: uri.toString()
+                adapter.addPhoto(displayPath)
+                // 如果是相机拍照触发的实时事件，自动切换到详情模式；批量同步不跳转
+                if (fromLiveEvent) {
+                    val intent = Intent(this@GalleryActivity, MainActivity::class.java)
+                    intent.putExtra("photo_path", displayPath)
+                    startActivity(intent)
+                }
+            }
+        }
+
+        override fun onSyncProgress(current: Int, total: Int) {
+            runOnUiThread {
+                val msg = if (total > 0) "Syncing photos: $current / $total" else "Syncing photos: $current"
+                val root = findViewById<View>(android.R.id.content)
+                if (syncSnackbar == null) {
+                    syncSnackbar = Snackbar.make(root, msg, Snackbar.LENGTH_INDEFINITE)
+                    syncSnackbar?.show()
+                } else {
+                    syncSnackbar?.setText(msg)
+                }
+            }
+        }
+
+        override fun onSyncCompleted(total: Int) {
+            runOnUiThread {
+                val msg = if (total >= 0) "Sync completed: $total new photos" else "Sync completed"
+                syncSnackbar?.setText(msg)
+                syncSnackbar?.setDuration(3000)
+                syncSnackbar?.show()
+                syncSnackbar = null
             }
         }
     }
@@ -84,7 +113,11 @@ class GalleryActivity : AppCompatActivity() {
         
         // 启动并绑定服务
         val intent = Intent(this, CameraService::class.java)
-        startForegroundService(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
         bindService(intent, serviceConnection, BIND_AUTO_CREATE)
     }
 
@@ -100,6 +133,7 @@ class GalleryActivity : AppCompatActivity() {
         runOnUiThread {
             statusBarStatus.text = text
             isConnected?.let {
+                @Suppress("DEPRECATION")
                 connectionIndicator.setBackgroundColor(
                     if (it) android.graphics.Color.GREEN else android.graphics.Color.RED
                 )
@@ -107,32 +141,8 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
-    private fun enableImmersiveMode() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-            val controller = window.insetsController
-            if (controller != null) {
-                controller.hide(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
-                controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
-        }
-    }
-
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        // 移除 enableImmersiveMode() 调用
-    }
-
     private fun loadPhotos() {
-        photoList.clear()
+        // Example implementation: Load photos from a predefined directory
         val projection = arrayOf(MediaStore.Images.Media.DATA)
         val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
         val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
