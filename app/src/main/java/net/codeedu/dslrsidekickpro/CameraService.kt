@@ -68,7 +68,8 @@ class CameraService : Service() {
                 }
             }
             val files = listFilesInFolder(path)
-            files?.filter { it.lowercase().endsWith(".jpg") }?.forEach { fileName ->
+            // 优化: RAW+JPG模式下,只计数JPG文件
+            files?.filter { it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg") }?.forEach { fileName ->
                 val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
                 if (countedPaths.contains(fullPathKey)) return@forEach
                 if (existingFiles.contains(fileName)) {
@@ -299,8 +300,8 @@ class CameraService : Service() {
         syncExecutor.execute {
             try {
                 updateStatus(CameraStatus.SYNCING)
-                // Give camera a moment to initialize internal storage
-                Thread.sleep(1500)
+                // 优化: 缩短相机初始化等待时间到500ms
+                Thread.sleep(500)
 
                 val existingFiles = getExistingPublicPhotos()
                 Log.d("CameraService", "Existing photos in gallery: ${existingFiles.size}")
@@ -375,7 +376,10 @@ class CameraService : Service() {
             }
 
             val files = listFilesInFolder(path)
-            files?.filter { it.lowercase().endsWith(".jpg") }?.reversed()?.forEach { fileName ->
+            // 优化: RAW+JPG模式下,只同步JPG文件用于快速预览
+            files?.filter { 
+                it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg")
+            }?.reversed()?.forEach { fileName ->
                 // 添加连接检查，防止断开时继续操作
                 if (!isCameraConnected) return@forEach
 
@@ -424,27 +428,35 @@ class CameraService : Service() {
 
     private fun startEventPolling() {
         eventPollingExecutor = Executors.newSingleThreadExecutor()
+        
         eventPollingExecutor?.execute {
             while (isCameraConnected) {
                 try {
-                    val fullPath = pollEvent(200)
+                    // 优化: 缩短poll超时到100ms,提高响应速度
+                    val fullPath = pollEvent(100)
                     if (fullPath == null) {
-                        Thread.sleep(500)
+                        Thread.sleep(200) // 优化: 缩短无事件时的等待时间
                         continue
                     }
                     val lastSlash = fullPath.lastIndexOf('/')
                     if (lastSlash != -1) {
                         val folder = fullPath.substring(0, lastSlash)
                         val fileName = fullPath.substring(lastSlash + 1)
-                        if (fileName.lowercase().endsWith(".jpg")) {
-                            // 添加超时机制下载文件
-                            val imageData = downloadFileWithTimeout(folder, fileName)
-                            if (imageData != null) {
-                                val uri = saveToPublicGallery(fileName, imageData)
-                                uri?.let {
-                                    val realPath = getRealPathFromURI(it)
-                                    listeners.forEach { listener -> listener.onNewPhoto(it, realPath, true) }
+                        if (fileName.lowercase().endsWith(".jpg") || fileName.lowercase().endsWith(".jpeg")) {
+                            Log.i("CameraService", "New photo detected: $fileName")
+                            // USB传输单线程最快,直接在当前线程下载
+                            try {
+                                // 添加超时机制下载文件
+                                val imageData = downloadFileWithTimeout(folder, fileName)
+                                if (imageData != null) {
+                                    val uri = saveToPublicGallery(fileName, imageData)
+                                    uri?.let {
+                                        val realPath = getRealPathFromURI(it)
+                                        listeners.forEach { listener -> listener.onNewPhoto(it, realPath, true) }
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                Log.e("CameraService", "Download error", e)
                             }
                         }
                     }
@@ -539,10 +551,11 @@ class CameraService : Service() {
      * 带超时机制的文件下载包装方法
      * @param folderPath 文件夹路径
      * @param fileName 文件名
-     * @return 文件数据，或在超时/错误时返回null
+     * @return 文件数据,或在超时/错误时返回null
      */
     private fun downloadFileWithTimeout(folderPath: String, fileName: String): ByteArray? {
-        val timeoutMs = 30000L
+        // 优化: 缩短超时时间到10秒,快速失败重试
+        val timeoutMs = 10000L
         return try {
             val startTime = System.currentTimeMillis()
             var result: ByteArray? = null
@@ -551,13 +564,13 @@ class CameraService : Service() {
             }
             thread.start()
             thread.join(timeoutMs)
-
+    
             if (thread.isAlive) {
                 Log.w("CameraService", "Download timeout for $folderPath/$fileName")
                 thread.interrupt()
                 return null
             }
-
+    
             val elapsed = System.currentTimeMillis() - startTime
             // Per-file download timing is verbose; keep at DEBUG level
             Log.d("CameraService", "Downloaded $fileName in ${elapsed}ms")

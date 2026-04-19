@@ -39,21 +39,31 @@ class CenterCropRegionTransformation(private val targetPoint: android.graphics.P
         if (targetPoint != null) {
             centerX = targetPoint.x
             centerY = targetPoint.y
+            Log.d("CenterCrop", "Target point: ($centerX, $centerY), Output size: ${outWidth}x${outHeight}, Source size: ${toTransform.width}x${toTransform.height}")
         } else {
             centerX = toTransform.width / 2
             centerY = toTransform.height / 2
+            Log.d("CenterCrop", "Using center point: ($centerX, $centerY)")
         }
 
-        val left = (centerX - outWidth / 2).coerceIn(0, (toTransform.width - outWidth).coerceAtLeast(0))
-        val top = (centerY - outHeight / 2).coerceIn(0, (toTransform.height - outHeight).coerceAtLeast(0))
-        val width = outWidth.coerceAtMost(toTransform.width)
-        val height = outHeight.coerceAtMost(toTransform.height)
+        // 计算裁剪区域，确保不超出图片边界
+        var left = centerX - outWidth / 2
+        var top = centerY - outHeight / 2
+        
+        // 边界检查
+        left = left.coerceIn(0, (toTransform.width - outWidth).coerceAtLeast(0))
+        top = top.coerceIn(0, (toTransform.height - outHeight).coerceAtLeast(0))
+        
+        val width = outWidth.coerceAtMost(toTransform.width - left)
+        val height = outHeight.coerceAtMost(toTransform.height - top)
+        
+        Log.d("CenterCrop", "Cropping from ($left, $top) with size ${width}x${height}")
         
         return Bitmap.createBitmap(toTransform, left, top, width, height)
     }
 
     override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-        messageDigest.update("eye_crop_100_v1".toByteArray())
+        messageDigest.update("eye_crop_100_v2".toByteArray())
         targetPoint?.let { 
             messageDigest.update(it.x.toString().toByteArray())
             messageDigest.update(it.y.toString().toByteArray())
@@ -121,6 +131,11 @@ class MainActivity : AppCompatActivity() {
                     allPhotos.add(0, displayPath)
                     pagerAdapter.notifyItemInserted(0)
                     pagerAdapter.notifyDataSetChanged() // 确保 ViewPager 刷新
+                    
+                    // 优化: 立即显示加载状态,提升用户感知速度
+                    if (fromLiveEvent) {
+                        updateStatus("📸 New photo received! Loading...", isCameraConnected)
+                    }
                 }
                 // 仅当是实时拍照事件时，自动切换到详情视图并更新 detail
                 if (fromLiveEvent) {
@@ -274,55 +289,185 @@ class MainActivity : AppCompatActivity() {
                     val iso = exif?.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)
                         ?: exif?.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY)
                         ?: "--"
-                    "f/$aperture   ${formatShutter(shutter)}s   ISO $iso"
+                    val focalLength = formatFocalLength(exif?.getAttribute(ExifInterface.TAG_FOCAL_LENGTH))
+                    "f/$aperture   ${formatShutter(shutter)}s   ISO $iso   ${focalLength}mm"
                 } catch (e: Exception) {
                     Log.e("MainActivity", "EXIF read error", e)
-                    "--   --   --"
+                    "--   --   --   --"
                 }
             }
             exifInfoTextView.text = exifData
             updateStatus("Analyzing: $fileName", isCameraConnected)
 
-            // 2. ML Kit 人眼精确检测（使用缩略图以节省内存）
-            val eyePoint = withContext(Dispatchers.IO) {
+            // 2. 确定放大中心点（优先级：人眼 > EXIF对焦点 > 中央）
+            val cropCenter = withContext(Dispatchers.IO) {
+                // 优先级1: 尝试人眼检测
                 var bitmap: Bitmap? = null
                 try {
-                    val options = BitmapFactory.Options().apply { inSampleSize = 4 }
+                    val options = BitmapFactory.Options().apply { inSampleSize = 8 }
                     bitmap = if (isContent) {
                         val uri = Uri.parse(path)
                         contentResolver.openInputStream(uri)?.use { stream -> BitmapFactory.decodeStream(stream, null, options) }
                     } else {
                         BitmapFactory.decodeFile(path, options)
                     }
-                    if (bitmap == null) return@withContext null
-
+                    
+                    if (bitmap == null) {
+                        Log.w("MainActivity", "Failed to decode bitmap for eye detection")
+                        return@withContext null
+                    }
+                    
+                    Log.d("MainActivity", "Bitmap loaded: ${bitmap.width}x${bitmap.height}, starting face detection...")
+                    
                     val image = InputImage.fromBitmap(bitmap, 0)
                     val faces = faceDetector.process(image).await()
-                    val face = faces.firstOrNull() ?: return@withContext null
-                    val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)
-                    val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)
-                    val targetLandmark = leftEye ?: rightEye
-                    targetLandmark?.position?.let {
-                        android.graphics.Point(it.x.toInt() * 4, it.y.toInt() * 4)
+                    
+                    Log.d("MainActivity", "Face detection completed, found ${faces.size} face(s)")
+                    
+                    val face = faces.firstOrNull()
+                    if (face == null) {
+                        Log.d("MainActivity", "No face detected, will try EXIF or center")
+                        // 继续执行后面的EXIF逻辑
+                    } else {
+                        Log.d("MainActivity", "Face bounds: ${face.boundingBox}")
+                        
+                        // 获取左右眼
+                        val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)
+                        val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)
+                        
+                        Log.d("MainActivity", "Left eye: ${leftEye?.position}, Right eye: ${rightEye?.position}")
+                        
+                        // 智能选择：优先使用左眼
+                        val targetLandmark = when {
+                            leftEye != null && rightEye != null -> {
+                                Log.d("MainActivity", "Both eyes detected, using left eye by default")
+                                leftEye
+                            }
+                            leftEye != null -> {
+                                Log.d("MainActivity", "Only left eye detected")
+                                leftEye
+                            }
+                            rightEye != null -> {
+                                Log.d("MainActivity", "Only right eye detected")
+                                rightEye
+                            }
+                            else -> {
+                                Log.w("MainActivity", "Face detected but no eyes found")
+                                null
+                            }
+                        }
+                        
+                        val result = targetLandmark?.position?.let {
+                            val scaledPoint = android.graphics.Point(it.x.toInt() * 8, it.y.toInt() * 8)
+                            Log.i("MainActivity", "✅ Using eye position for crop: $scaledPoint (original: ${it.x}, ${it.y})")
+                            scaledPoint
+                        }
+                        
+                        if (result != null) {
+                            return@withContext result
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e("MainActivity", "Eye detection error", e)
-                    null
                 } finally {
                     bitmap?.recycle()
                 }
+                
+                // 优先级2: 尝试从EXIF获取对焦点位置
+                try {
+                    val exif = if (isContent) {
+                        val uri = Uri.parse(path)
+                        contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
+                    } else {
+                        ExifInterface(path)
+                    }
+                    
+                    // 获取对焦点坐标（不同相机厂商可能使用不同标签）
+                    val afPointX = exif?.getAttribute("InteroperabilityIndex") 
+                        ?: exif?.getAttribute("SubjectLocation")
+                        ?: exif?.getAttribute("SubjectArea")
+                    
+                    if (!afPointX.isNullOrEmpty()) {
+                        // 解析对焦点坐标，格式可能是 "x,y" 或 "x,y,width,height"
+                        val parts = afPointX.split(",", " ").filter { it.isNotEmpty() }
+                        if (parts.size >= 2) {
+                            val x = parts[0].toIntOrNull()
+                            val y = parts[1].toIntOrNull()
+                            if (x != null && y != null) {
+                                Log.d("MainActivity", "Using AF point from EXIF: ($x, $y)")
+                                return@withContext android.graphics.Point(x, y)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d("MainActivity", "No AF point in EXIF, will use center")
+                }
+                
+                // 优先级3: 默认使用画面中央
+                Log.d("MainActivity", "Using center point for crop")
+                return@withContext null
             }
-
-            // 3. 加载 100% 细节图（Glide 支持 content:// Uri）
-            Glide.with(this@MainActivity)
-                .asBitmap()
-                .load(path)
-                .override(com.bumptech.glide.request.target.Target.SIZE_ORIGINAL)
-                .transform(CenterCropRegionTransformation(eyePoint))
-                .diskCacheStrategy(DiskCacheStrategy.RESOURCE)
-                .into(focusCheckImageView)
-
-            updateStatus("Ready: $fileName", isCameraConnected)
+            
+            // 3. 加载并裁剪图片
+            Log.d("MainActivity", "Loading detail image with crop center: $cropCenter")
+            
+            mainScope.launch {
+                val croppedBitmap = withContext(Dispatchers.IO) {
+                    try {
+                        // 加载原图
+                        val originalBitmap = if (isContent) {
+                            val uri = Uri.parse(path)
+                            contentResolver.openInputStream(uri)?.use { stream ->
+                                BitmapFactory.decodeStream(stream)
+                            }
+                        } else {
+                            BitmapFactory.decodeFile(path)
+                        }
+                        
+                        if (originalBitmap == null) {
+                            Log.e("MainActivity", "Failed to load original bitmap")
+                            return@withContext null
+                        }
+                        
+                        Log.d("MainActivity", "Original bitmap loaded: ${originalBitmap.width}x${originalBitmap.height}")
+                        
+                        // 计算裁剪区域
+                        val cropSize = 300.dpToPx() // 使用focusCheckCard的高度
+                        val centerX = cropCenter?.x ?: (originalBitmap.width / 2)
+                        val centerY = cropCenter?.y ?: (originalBitmap.height / 2)
+                        
+                        var left = centerX - cropSize / 2
+                        var top = centerY - cropSize / 2
+                        
+                        // 边界检查
+                        left = left.coerceIn(0, (originalBitmap.width - cropSize).coerceAtLeast(0))
+                        top = top.coerceIn(0, (originalBitmap.height - cropSize).coerceAtLeast(0))
+                        
+                        val width = cropSize.coerceAtMost(originalBitmap.width - left)
+                        val height = cropSize.coerceAtMost(originalBitmap.height - top)
+                        
+                        Log.d("CenterCrop", "Cropping from ($left, $top) size ${width}x${height}, center: ($centerX, $centerY)")
+                        
+                        // 执行裁剪
+                        val cropped = Bitmap.createBitmap(originalBitmap, left, top, width, height)
+                        originalBitmap.recycle() // 释放原图内存
+                        
+                        Log.d("MainActivity", "✅ Cropped bitmap: ${cropped.width}x${cropped.height}")
+                        cropped
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "❌ Crop error", e)
+                        null
+                    }
+                }
+                
+                // 在主线程设置图片
+                if (croppedBitmap != null) {
+                    focusCheckImageView.setImageBitmap(croppedBitmap)
+                    updateStatus("Ready: $fileName", isCameraConnected)
+                } else {
+                    Log.e("MainActivity", "Failed to create cropped bitmap")
+                }
+            }
         }
     }
 
@@ -377,10 +522,62 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatShutter(shutter: String): String {
-        return if (shutter.contains("/")) {
+        return try {
+            if (shutter.contains("/")) {
+                // 已经是分数格式，如 "1/250"
+                shutter
+            } else {
+                // 小数格式，如 "0.004"，转换为分数 "1/250"
+                val decimalValue = shutter.toDouble()
+                if (decimalValue >= 1.0) {
+                    // 大于等于1秒，直接显示
+                    "${decimalValue.toInt()}"
+                } else {
+                    // 小于1秒，转换为分数
+                    val denominator = (1.0 / decimalValue).toInt()
+                    "1/$denominator"
+                }
+            }
+        } catch (e: Exception) {
             shutter
-        } else {
-            "1/$shutter"
+        }
+    }
+
+    private fun formatFocalLength(focalLength: String?): String {
+        return try {
+            if (focalLength.isNullOrEmpty() || focalLength == "0") {
+                "--"
+            } else if (focalLength.contains("/")) {
+                // 分数格式，如 "550/10"，计算为 "55"
+                val parts = focalLength.split("/")
+                if (parts.size == 2) {
+                    val numerator = parts[0].toDouble()
+                    val denominator = parts[1].toDouble()
+                    if (denominator != 0.0) {
+                        val result = numerator / denominator
+                        // 如果是整数，不显示小数点
+                        if (result == result.toInt().toDouble()) {
+                            "${result.toInt()}"
+                        } else {
+                            String.format("%.1f", result)
+                        }
+                    } else {
+                        "--"
+                    }
+                } else {
+                    focalLength
+                }
+            } else {
+                // 已经是数字格式
+                val value = focalLength.toDouble()
+                if (value == value.toInt().toDouble()) {
+                    "${value.toInt()}"
+                } else {
+                    String.format("%.1f", value)
+                }
+            }
+        } catch (e: Exception) {
+            "--"
         }
     }
 

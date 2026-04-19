@@ -214,13 +214,21 @@ Java_net_codeedu_dslrsidekickpro_CameraService_downloadFile(JNIEnv *env, jobject
     const char *name = env->GetStringUTFChars(file_name, nullptr);
     CameraFile *file;
     gp_file_new(&file);
+    
+    // 摄影师需要原图才能判断拍摄效果,直接下载完整文件
     int rc = gp_camera_file_get(g_camera, folder, name, GP_FILE_TYPE_NORMAL, file, g_context);
+    
     env->ReleaseStringUTFChars(folder_path, folder);
     env->ReleaseStringUTFChars(file_name, name);
-    if (rc != GP_OK) { gp_file_unref(file); return nullptr; }
+    if (rc != GP_OK) { 
+        LOGE("Failed to download file: %s/%s, error: %d", folder, name, rc);
+        gp_file_unref(file); 
+        return nullptr; 
+    }
     const char *data;
     unsigned long size;
     gp_file_get_data_and_size(file, &data, &size);
+    LOGI("Downloaded %lu bytes for %s", size, name);
     jbyteArray array = env->NewByteArray(size);
     env->SetByteArrayRegion(array, 0, size, (const jbyte *)data);
     gp_file_unref(file);
