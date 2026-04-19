@@ -118,7 +118,8 @@ Java_net_codeedu_dslrsidekickpro_CameraService_disconnectCameraNative(JNIEnv *en
     LOCK_CAMERA;
     if (g_camera) {
         LOGI("Disconnecting camera and clearing FD");
-        gp_camera_exit(g_camera, g_context);
+        // 如果设备已经断开（fd失效），直接释放引用而不执行交互式的 exit
+        // 这能防止 libusb 在设备不存在时尝试写入而崩溃
         gp_camera_unref(g_camera);
         g_camera = nullptr;
     }

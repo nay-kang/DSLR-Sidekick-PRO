@@ -23,6 +23,7 @@ class CameraService : Service() {
 
     private val ACTION_USB_PERMISSION = "net.codeedu.dslrsidekickpro.USB_PERMISSION"
     private var isCameraConnected = false
+    private var isConnecting = false // 新增状态锁，防止并发连接
     private var usbDeviceConnection: android.hardware.usb.UsbDeviceConnection? = null
     private lateinit var usbManager: UsbManager
     
@@ -100,6 +101,11 @@ class CameraService : Service() {
         findAndConnectCamera()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        findAndConnectCamera()
+        return START_STICKY
+    }
+
     private fun startForegroundService() {
         val channelId = "CameraServiceChannel"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -137,6 +143,7 @@ class CameraService : Service() {
     }
 
     private fun findAndConnectCamera() {
+        if (isCameraConnected || isConnecting) return
         val deviceList = usbManager.deviceList
         // Keep detailed USB information at DEBUG level to avoid noisy production logs
         Log.d("CameraService", "USB Device List: ${deviceList.values}")
@@ -145,25 +152,41 @@ class CameraService : Service() {
             return
         }
         for (device in deviceList.values) {
-            Log.d("CameraService", "Checking device: ${device.deviceName}")
-            if (usbManager.hasPermission(device)) {
-                openAndConnect(device)
-            } else {
-                requestPermission(device)
+            Log.d("CameraService", "Checking device: ${device.deviceName} (${device.productName})")
+            
+            // 简单的识别：PTP Class (6) 或者常见的 VendorID
+            val isPTP = (0 until device.interfaceCount).any { device.getInterface(it).interfaceClass == 6 }
+            val isKnownBrand = device.vendorId == 0x04b0 || device.vendorId == 0x04a9 || device.vendorId == 0x04cb
+            
+            if (isPTP || isKnownBrand) {
+                if (usbManager.hasPermission(device)) {
+                    openAndConnect(device)
+                } else {
+                    requestPermission(device)
+                }
+                return
             }
-            return
         }
+        
+        // 兜底：如果没匹配到，尝试第一个
+        val first = deviceList.values.first()
+        if (usbManager.hasPermission(first)) openAndConnect(first) else requestPermission(first)
     }
 
     private fun requestPermission(device: UsbDevice) {
         val permissionIntent = PendingIntent.getBroadcast(
-            this, 0, Intent(ACTION_USB_PERMISSION),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
+            this, 0, Intent(ACTION_USB_PERMISSION).apply {
+                setPackage(packageName) // 关键修复：指定包名，使 Intent 显式化，适配 API 34
+                putExtra(UsbManager.EXTRA_DEVICE, device)
+            },
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
         )
         usbManager.requestPermission(device, permissionIntent)
     }
 
     private fun openAndConnect(device: UsbDevice) {
+        if (isConnecting) return
+        isConnecting = true
         try {
             usbDeviceConnection?.close()
             usbDeviceConnection = usbManager.openDevice(device)
@@ -171,31 +194,37 @@ class CameraService : Service() {
             if (connection != null) {
                 val fd = connection.fileDescriptor
                 Thread {
-                    var result = connectToCamera(fd)
-                    var retryCount = 0
+                    try {
+                        var result = connectToCamera(fd)
+                        var retryCount = 0
 
-                    // 重试逻辑：最多重试2次
-                    while (result != 0 && retryCount < 2 && isCameraConnected.not()) {
-                        Log.w("CameraService", "Connection failed, retrying... (attempt ${retryCount + 2})")
-                        Thread.sleep(1000)
-                        result = connectToCamera(fd)
-                        retryCount++
-                    }
+                        // 重试逻辑：最多重试2次
+                        while (result != 0 && retryCount < 2) {
+                            Log.w("CameraService", "Connection failed, retrying... (attempt ${retryCount + 2})")
+                            Thread.sleep(1000)
+                            result = connectToCamera(fd)
+                            retryCount++
+                        }
 
-                    if (result == 0) {
-                        isCameraConnected = true
-                        updateStatus("Connected! Syncing...", true)
-                        syncAllPhotos()
-                        startEventPolling()
-                    } else {
-                        isCameraConnected = false
-                        updateStatus("Connection failed after ${retryCount + 1} attempts (error: $result)", false)
+                        if (result == 0) {
+                            isCameraConnected = true
+                            updateStatus("Connected! Syncing...", true)
+                            syncAllPhotos()
+                            startEventPolling()
+                        } else {
+                            isCameraConnected = false
+                            updateStatus("Connection failed (error: $result)", false)
+                        }
+                    } finally {
+                        isConnecting = false // 无论成功失败，重置状态
                     }
                 }.start()
             } else {
+                isConnecting = false
                 updateStatus("Failed to open USB device", false)
             }
         } catch (e: Exception) {
+            isConnecting = false
             Log.e("CameraService", "Error in openAndConnect", e)
             updateStatus("Connection error: ${e.message}", false)
         }
@@ -220,7 +249,9 @@ class CameraService : Service() {
                     intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
                 }
                 if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                    device?.let { openAndConnect(it) }
+                    device?.let { openAndConnect(it) } ?: findAndConnectCamera()
+                } else {
+                    updateStatus("USB Permission Denied", false)
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED == action) {
                 isCameraConnected = false
