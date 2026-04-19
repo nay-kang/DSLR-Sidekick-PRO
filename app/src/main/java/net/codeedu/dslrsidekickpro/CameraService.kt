@@ -26,6 +26,7 @@ class CameraService : Service() {
     private var isConnecting = false // 新增状态锁，防止并发连接
     private var usbDeviceConnection: android.hardware.usb.UsbDeviceConnection? = null
     private lateinit var usbManager: UsbManager
+    private var eventPollingExecutor: java.util.concurrent.ExecutorService? = null
     
     private val binder = CameraBinder()
     // 使用 CopyOnWriteArrayList 确保线程安全，避免竞态条件
@@ -42,7 +43,7 @@ class CameraService : Service() {
         /**
          * Notify listener of a new photo saved to gallery.
          * @param uri content Uri for the saved image (always provided)
-         * @param realPath real filesystem path when available (may be null on scoped storage)
+         * @param realPath real filesystem path when available (maybe null on scoped storage)
          * @param fromLiveEvent true when photo came from a live camera event (shutter press),
          *                      false when photo came from a batch sync.
          */
@@ -137,11 +138,15 @@ class CameraService : Service() {
 
     fun addListener(listener: CameraEventListener) {
         listeners.add(listener)
+        // 添加监听器时，立即发送当前状态
+        val currentStatus = if (isCameraConnected) CameraStatus.CONNECTED else CameraStatus.DISCONNECTED
+        listener.onCameraStatusUpdate(currentStatus)
     }
 
     fun removeListener(listener: CameraEventListener) {
         listeners.remove(listener)
     }
+
 
     private fun updateStatus(status: CameraStatus, extraMessage: String? = null) {
         val logText = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
@@ -241,6 +246,15 @@ class CameraService : Service() {
         isCameraConnected = false
         disconnectCameraNative()
         usbDeviceConnection?.close()
+        // Shutdown event polling executor to prevent thread leak
+        eventPollingExecutor?.shutdown()
+        try {
+            if (!eventPollingExecutor?.awaitTermination(1, java.util.concurrent.TimeUnit.SECONDS)!!) {
+                eventPollingExecutor?.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            eventPollingExecutor?.shutdownNow()
+        }
         unregisterReceiver(usbReceiver)
         super.onDestroy()
     }
@@ -409,7 +423,8 @@ class CameraService : Service() {
     }
 
     private fun startEventPolling() {
-        Executors.newSingleThreadExecutor().execute {
+        eventPollingExecutor = Executors.newSingleThreadExecutor()
+        eventPollingExecutor?.execute {
             while (isCameraConnected) {
                 try {
                     val fullPath = pollEvent(200)
@@ -443,7 +458,7 @@ class CameraService : Service() {
         }
     }
 
-    private fun saveToPublicGallery(fileName: String, data: ByteArray): android.net.Uri? {
+    private fun saveToPublicGallery(fileName: String, data: ByteArray): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -495,13 +510,15 @@ class CameraService : Service() {
                     }
                 }
             }
-            } catch (e: Exception) {
-                Log.e("CameraService", "Error querying MediaStore", e)
+        } catch (e: Exception) {
+            Log.e("CameraService", "Error querying MediaStore", e)
+            // Fallback: return empty set to allow sync to continue
+            Log.w("CameraService", "Using fallback: treating all photos as new")
         }
         return names
     }
 
-    private fun getRealPathFromURI(uri: android.net.Uri): String? {
+    private fun getRealPathFromURI(uri: Uri): String? {
         return try {
             val projection = arrayOf(MediaStore.Images.Media.DATA)
             contentResolver.query(uri, projection, null, null, null)?.use { cursor ->

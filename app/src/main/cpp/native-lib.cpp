@@ -20,7 +20,7 @@ static Camera *g_camera = nullptr;
 static GPContext *g_context = nullptr;
 
 // External gphoto2 internal function for Android USB FD injection
-extern "C" int gp_port_usb_set_sys_device(int fd);
+
 
 static void log_func(GPLogLevel level, const char *domain, const char *str, void *data) {
     if (level <= GP_LOG_ERROR) {
@@ -126,7 +126,7 @@ Java_net_codeedu_dslrsidekickpro_CameraService_disconnectCameraNative(JNIEnv *en
         // 极易因尝试访问已失效的 libusb 设备列表而触发引用计数断言失败并崩溃。
         // 通过将 cam->port 置为 NULL，我们强制 gp_camera_free 跳过端口清理逻辑。
         // 这虽然会导致极小的内存泄漏，但保证了在相机拔出时应用不会闪退。
-        if (cam->port) {
+        if (cam && cam->port) {
             LOGI("Bypassing port destruction to prevent libusb crash");
             cam->port = nullptr;
         }

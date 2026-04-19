@@ -16,8 +16,11 @@ import android.content.ServiceConnection
 import android.hardware.usb.UsbManager
 import android.os.IBinder
 import android.os.Parcelable
-import android.util.Log
 import android.view.WindowManager
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -102,6 +105,18 @@ class GalleryActivity : AppCompatActivity() {
 
         setContentView(R.layout.activity_gallery)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Request notification permission for Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) 
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_NOTIFICATION_PERMISSION
+                )
+            }
+        }
 
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
@@ -210,5 +225,9 @@ class GalleryActivity : AppCompatActivity() {
         recyclerView.layoutManager?.onSaveInstanceState()?.let {
             outState.putParcelable("recycler_state", it)
         }
+    }
+
+    companion object {
+        private const val REQUEST_NOTIFICATION_PERMISSION = 1001
     }
 }

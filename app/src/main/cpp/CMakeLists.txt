@@ -28,6 +28,13 @@ target_include_directories(usb PUBLIC
 )
 target_link_libraries(usb log)
 
+# --- libexif 配置 ---
+# 暂时禁用 libexif，Android 使用 ExifInterface 代替
+# add_library(exif SHARED ... )
+# target_compile_definitions(exif PRIVATE HAVE_CONFIG_H)
+# target_include_directories(exif PUBLIC ... )
+# target_link_libraries(exif log)
+
 # --- libgphoto2 核心与 PTP2 驱动静态链接 ---
 # 我们把核心库和 ptp2 驱动编译到一起，避免 Android 上的动态加载问题
 add_library(gphoto2 SHARED

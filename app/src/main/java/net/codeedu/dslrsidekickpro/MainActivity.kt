@@ -74,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     private val allPhotos = mutableListOf<String>()
     private var currentPhotoIndex = -1
     private lateinit var pagerAdapter: PhotoPagerAdapter
+    private var isCameraConnected: Boolean = false
 
     private var cameraService: CameraService? = null
     private var isBound = false
@@ -91,12 +92,15 @@ class MainActivity : AppCompatActivity() {
             val binder = service as CameraService.CameraBinder
             cameraService = binder.getService()
             isBound = true
+            // 添加监听器时，CameraService 会自动发送当前状态
             cameraService?.addListener(cameraListener)
         }
         override fun onServiceDisconnected(name: ComponentName?) {
             cameraService?.removeListener(cameraListener)
             cameraService = null
             isBound = false
+            isCameraConnected = false
+            updateStatus("相机未连接", false)
         }
     }
 
@@ -105,6 +109,7 @@ class MainActivity : AppCompatActivity() {
     private val cameraListener = object : CameraService.CameraEventListener {
         override fun onCameraStatusUpdate(status: CameraService.CameraStatus, extraMessage: String?) {
             val displayMessage = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
+            isCameraConnected = status.isConnected
             updateStatus(displayMessage, status.isConnected)
         }
 
@@ -115,6 +120,7 @@ class MainActivity : AppCompatActivity() {
                 if (!allPhotos.contains(displayPath)) {
                     allPhotos.add(0, displayPath)
                     pagerAdapter.notifyItemInserted(0)
+                    pagerAdapter.notifyDataSetChanged() // 确保 ViewPager 刷新
                 }
                 // 仅当是实时拍照事件时，自动切换到详情视图并更新 detail
                 if (fromLiveEvent) {
@@ -184,6 +190,9 @@ class MainActivity : AppCompatActivity() {
         val serviceIntent = Intent(this, CameraService::class.java)
         bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
 
+        // 初始化时设置默认状态（红色表示未连接）
+        updateStatus("相机未连接", false)
+        
         loadAllPhotos()
         
         val photoPath = intent.getStringExtra("photo_path")
@@ -211,22 +220,33 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadAllPhotos() {
-        allPhotos.clear()
-        val projection = arrayOf(MediaStore.Images.Media.DATA)
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
-        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
+        mainScope.launch {
+            withContext(Dispatchers.IO) {
+                val photos = mutableListOf<String>()
+                val projection = arrayOf(MediaStore.Images.Media.DATA)
+                val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+                val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
+                val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
 
-        contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            sortOrder
-        )?.use { cursor ->
-            val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-            while (cursor.moveToNext()) {
-                allPhotos.add(cursor.getString(index))
+                contentResolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    sortOrder
+                )?.use { cursor ->
+                    val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+                    while (cursor.moveToNext()) {
+                        photos.add(cursor.getString(index))
+                    }
+                }
+                
+                // Update UI on main thread
+                withContext(Dispatchers.Main) {
+                    allPhotos.clear()
+                    allPhotos.addAll(photos)
+                    pagerAdapter.notifyDataSetChanged()
+                }
             }
         }
     }
@@ -236,8 +256,11 @@ class MainActivity : AppCompatActivity() {
         val file = if (!isContent) File(path) else null
         if (!isContent && (file == null || !file.exists())) return
 
+        val fileName = if (file != null) file.name else Uri.parse(path).lastPathSegment ?: "Unknown"
+        
         mainScope.launch {
             // 1. 获取 EXIF
+            updateStatus("Loading: $fileName", isCameraConnected)
             val exifData = withContext(Dispatchers.IO) {
                 try {
                     val exif = if (isContent) {
@@ -248,7 +271,9 @@ class MainActivity : AppCompatActivity() {
                     }
                     val aperture = exif?.getAttribute(ExifInterface.TAG_F_NUMBER) ?: "--"
                     val shutter = exif?.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: "--"
-                    val iso = exif?.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS) ?: "--"
+                    val iso = exif?.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)
+                        ?: exif?.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY)
+                        ?: "--"
                     "f/$aperture   ${formatShutter(shutter)}s   ISO $iso"
                 } catch (e: Exception) {
                     Log.e("MainActivity", "EXIF read error", e)
@@ -256,11 +281,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             exifInfoTextView.text = exifData
-            updateStatus("Finding Eyes...")
+            updateStatus("Analyzing: $fileName", isCameraConnected)
 
             // 2. ML Kit 人眼精确检测（使用缩略图以节省内存）
             val eyePoint = withContext(Dispatchers.IO) {
-                var bitmap: android.graphics.Bitmap? = null
+                var bitmap: Bitmap? = null
                 try {
                     val options = BitmapFactory.Options().apply { inSampleSize = 4 }
                     bitmap = if (isContent) {
@@ -297,13 +322,15 @@ class MainActivity : AppCompatActivity() {
                 .diskCacheStrategy(DiskCacheStrategy.RESOURCE)
                 .into(focusCheckImageView)
 
-            updateStatus("Viewing: ${if (file != null) file.name else Uri.parse(path).lastPathSegment}")
+            updateStatus("Ready: $fileName", isCameraConnected)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        // Cancel all coroutines first to prevent race conditions
         mainScope.cancel()
+        // Then close resources
         faceDetector.close()
         if (isBound) {
             cameraService?.removeListener(cameraListener)
@@ -315,6 +342,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             statusBarStatus.text = text
             isConnected?.let {
+                @Suppress("DEPRECATION")
                 connectionIndicator.setBackgroundColor(
                     if (it) android.graphics.Color.GREEN else android.graphics.Color.RED
                 )
