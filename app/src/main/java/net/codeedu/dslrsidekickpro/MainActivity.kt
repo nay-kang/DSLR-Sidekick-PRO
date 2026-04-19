@@ -8,7 +8,6 @@ import java.io.File
 import kotlinx.coroutines.*
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-// ...
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
@@ -104,8 +103,9 @@ class MainActivity : AppCompatActivity() {
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
     private val cameraListener = object : CameraService.CameraEventListener {
-        override fun onStatusUpdate(text: String, isConnected: Boolean?) {
-            updateStatus(text, isConnected)
+        override fun onCameraStatusUpdate(status: CameraService.CameraStatus, extraMessage: String?) {
+            val displayMessage = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
+            updateStatus(displayMessage, status.isConnected)
         }
 
         override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {

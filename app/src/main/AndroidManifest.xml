@@ -21,6 +21,8 @@
         <activity
             android:name=".GalleryActivity"
             android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation"
             android:screenOrientation="sensor"
             android:theme="@style/Theme.AppCompat.NoActionBar">
             <intent-filter>
@@ -39,6 +41,8 @@
 
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation"
             android:screenOrientation="sensorLandscape"
             android:theme="@style/Theme.AppCompat.NoActionBar" />
 

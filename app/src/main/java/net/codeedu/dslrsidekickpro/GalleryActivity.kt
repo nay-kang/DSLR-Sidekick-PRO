@@ -13,9 +13,11 @@ import android.provider.MediaStore
 import android.os.Build
 import android.content.ComponentName
 import android.content.ServiceConnection
+import android.hardware.usb.UsbManager
 import android.os.IBinder
+import android.os.Parcelable
+import android.util.Log
 import android.view.WindowManager
-// ...
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -27,6 +29,8 @@ class GalleryActivity : AppCompatActivity() {
 
     private var cameraService: CameraService? = null
     private var isBound = false
+
+    private var pendingScrollState: Parcelable? = null
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -46,15 +50,15 @@ class GalleryActivity : AppCompatActivity() {
     private var syncSnackbar: Snackbar? = null
 
     private val cameraListener = object : CameraService.CameraEventListener {
-        override fun onStatusUpdate(text: String, isConnected: Boolean?) {
-            updateStatus(text, isConnected)
+        override fun onCameraStatusUpdate(status: CameraService.CameraStatus, extraMessage: String?) {
+            val displayMessage = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
+            updateStatus(displayMessage, status.isConnected)
         }
 
         override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
             runOnUiThread {
                 val displayPath = realPath ?: uri.toString()
                 adapter.addPhoto(displayPath)
-                // 如果是相机拍照触发的实时事件，自动切换到详情模式；批量同步不跳转
                 if (fromLiveEvent) {
                     val intent = Intent(this@GalleryActivity, MainActivity::class.java)
                     intent.putExtra("photo_path", displayPath)
@@ -69,6 +73,7 @@ class GalleryActivity : AppCompatActivity() {
                 val root = findViewById<View>(android.R.id.content)
                 if (syncSnackbar == null) {
                     syncSnackbar = Snackbar.make(root, msg, Snackbar.LENGTH_INDEFINITE)
+                    syncSnackbar?.view?.translationZ = -1f
                     syncSnackbar?.show()
                 } else {
                     syncSnackbar?.setText(msg)
@@ -89,28 +94,38 @@ class GalleryActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        if (UsbManager.ACTION_USB_DEVICE_ATTACHED == intent?.action) {
+            finish()
+            return
+        }
+
         setContentView(R.layout.activity_gallery)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // 不再调用 enableImmersiveMode()，让系统 UI 正常显示
-        
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
-        
         recyclerView = findViewById(R.id.galleryRecyclerView)
         recyclerView.layoutManager = GridLayoutManager(this, 4)
 
         loadPhotos()
-
         adapter = PhotoAdapter(photoList) { path ->
             val intent = Intent(this, MainActivity::class.java)
             intent.putExtra("photo_path", path)
             startActivity(intent)
         }
         recyclerView.adapter = adapter
-        
-        updateStatus("Gallery Ready. Starting Sync Service...", false)
-        
+
+        // 在布局完成后恢复滚动状态（处理 Activity 重建）
+        if (pendingScrollState != null) {
+            recyclerView.post {
+                recyclerView.layoutManager?.onRestoreInstanceState(pendingScrollState)
+                pendingScrollState = null
+            }
+        }
+
+        updateStatus("相机未连接", false)
+
         // 启动并绑定服务
         val intent = Intent(this, CameraService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -126,6 +141,33 @@ class GalleryActivity : AppCompatActivity() {
         if (isBound) {
             cameraService?.removeListener(cameraListener)
             unbindService(serviceConnection)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // 保存当前滚动状态，以备恢复
+        pendingScrollState = recyclerView.layoutManager?.onSaveInstanceState()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 从暂停中恢复时，尝试恢复滚动位置（如果焦点尚未恢复，将在 onWindowFocusChanged 中兜底）
+        pendingScrollState?.let {
+            recyclerView.post {
+                recyclerView.layoutManager?.onRestoreInstanceState(it)
+            }
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 窗口重获焦点时，强制恢复滚动位置，解决 USB 连接导致的短暂失焦问题
+        if (hasFocus && pendingScrollState != null) {
+            recyclerView.post {
+                recyclerView.layoutManager?.onRestoreInstanceState(pendingScrollState)
+                pendingScrollState = null // 恢复后清除，避免用户正常滚动后被覆盖
+            }
         }
     }
 
@@ -159,6 +201,14 @@ class GalleryActivity : AppCompatActivity() {
             while (cursor.moveToNext()) {
                 photoList.add(cursor.getString(index))
             }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        // 保存状态用于 Activity 重建
+        recyclerView.layoutManager?.onSaveInstanceState()?.let {
+            outState.putParcelable("recycler_state", it)
         }
     }
 }

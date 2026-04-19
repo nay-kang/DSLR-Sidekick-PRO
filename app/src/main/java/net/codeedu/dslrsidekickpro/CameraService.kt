@@ -31,8 +31,14 @@ class CameraService : Service() {
     // 使用 CopyOnWriteArrayList 确保线程安全，避免竞态条件
     private val listeners = CopyOnWriteArrayList<CameraEventListener>()
 
+    enum class CameraStatus(val label: String, val isConnected: Boolean) {
+        DISCONNECTED("相机未连接", false),
+        CONNECTED("相机连接", true),
+        SYNCING("同步中", true)
+    }
+
     interface CameraEventListener {
-        fun onStatusUpdate(text: String, isConnected: Boolean? = null)
+        fun onCameraStatusUpdate(status: CameraStatus, extraMessage: String? = null)
         /**
          * Notify listener of a new photo saved to gallery.
          * @param uri content Uri for the saved image (always provided)
@@ -137,9 +143,10 @@ class CameraService : Service() {
         listeners.remove(listener)
     }
 
-    private fun updateStatus(text: String, isConnected: Boolean? = null) {
-        Log.i("CameraService", text)
-        listeners.forEach { it.onStatusUpdate(text, isConnected) }
+    private fun updateStatus(status: CameraStatus, extraMessage: String? = null) {
+        val logText = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
+        Log.i("CameraService", logText)
+        listeners.forEach { it.onCameraStatusUpdate(status, extraMessage) }
     }
 
     private fun findAndConnectCamera() {
@@ -148,7 +155,7 @@ class CameraService : Service() {
         // Keep detailed USB information at DEBUG level to avoid noisy production logs
         Log.d("CameraService", "USB Device List: ${deviceList.values}")
         if (deviceList.isEmpty()) {
-            updateStatus("No USB Device Found", false)
+            updateStatus(CameraStatus.DISCONNECTED)
             return
         }
         for (device in deviceList.values) {
@@ -208,12 +215,12 @@ class CameraService : Service() {
 
                         if (result == 0) {
                             isCameraConnected = true
-                            updateStatus("Connected! Syncing...", true)
+                            updateStatus(CameraStatus.CONNECTED)
                             syncAllPhotos()
                             startEventPolling()
                         } else {
                             isCameraConnected = false
-                            updateStatus("Connection failed (error: $result)", false)
+                            updateStatus(CameraStatus.DISCONNECTED, "错误: $result")
                         }
                     } finally {
                         isConnecting = false // 无论成功失败，重置状态
@@ -221,12 +228,12 @@ class CameraService : Service() {
                 }.start()
             } else {
                 isConnecting = false
-                updateStatus("Failed to open USB device", false)
+                updateStatus(CameraStatus.DISCONNECTED, "Failed to open USB device")
             }
         } catch (e: Exception) {
             isConnecting = false
             Log.e("CameraService", "Error in openAndConnect", e)
-            updateStatus("Connection error: ${e.message}", false)
+            updateStatus(CameraStatus.DISCONNECTED, e.message)
         }
     }
 
@@ -251,12 +258,12 @@ class CameraService : Service() {
                 if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
                     device?.let { openAndConnect(it) } ?: findAndConnectCamera()
                 } else {
-                    updateStatus("USB Permission Denied", false)
+                    updateStatus(CameraStatus.DISCONNECTED, "USB Permission Denied")
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED == action) {
                 isCameraConnected = false
                 disconnectCameraNative()
-                updateStatus("Camera Disconnected", false)
+                updateStatus(CameraStatus.DISCONNECTED)
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED == action) { // Handle USB device attachment
                 // USB attach is informational but verbose; log at DEBUG level
                 Log.d("CameraService", "USB Device Attached")
@@ -271,12 +278,13 @@ class CameraService : Service() {
             return
         }
 
-            Log.i("CameraService", "Starting photo sync...")
+        Log.i("CameraService", "Starting photo sync...")
         // Single thread executor for sync tasks to avoid concurrency issues with gphoto2 context
         val syncExecutor = Executors.newSingleThreadExecutor()
         val downloadedCount = AtomicInteger(0)
         syncExecutor.execute {
             try {
+                updateStatus(CameraStatus.SYNCING)
                 // Give camera a moment to initialize internal storage
                 Thread.sleep(1500)
 
@@ -324,6 +332,9 @@ class CameraService : Service() {
                 Log.i("CameraService", "Photo sync completed")
                 try {
                     listeners.forEach { it.onSyncCompleted(downloadedCount.get()) }
+                    if (isCameraConnected) {
+                        updateStatus(CameraStatus.CONNECTED)
+                    }
                 } catch (e: Exception) {
                     Log.e("CameraService", "Error notifying sync completion", e)
                 }

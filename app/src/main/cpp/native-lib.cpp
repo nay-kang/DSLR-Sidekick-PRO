@@ -117,15 +117,27 @@ extern "C" JNIEXPORT void JNICALL
 Java_net_codeedu_dslrsidekickpro_CameraService_disconnectCameraNative(JNIEnv *env, jobject thiz) {
     LOCK_CAMERA;
     if (g_camera) {
-        LOGI("Disconnecting camera and clearing FD");
-        // 如果设备已经断开（fd失效），直接释放引用而不执行交互式的 exit
-        // 这能防止 libusb 在设备不存在时尝试写入而崩溃
-        gp_camera_unref(g_camera);
+        LOGI("Disconnecting camera (Safe Mode)");
+        Camera *cam = g_camera;
         g_camera = nullptr;
+
+        // 针对 Android 平台的特殊处理：
+        // 当 USB 设备已经物理断开时，libgphoto2 的 libusb1 后端在释放端口时（gp_port_free）
+        // 极易因尝试访问已失效的 libusb 设备列表而触发引用计数断言失败并崩溃。
+        // 通过将 cam->port 置为 NULL，我们强制 gp_camera_free 跳过端口清理逻辑。
+        // 这虽然会导致极小的内存泄漏，但保证了在相机拔出时应用不会闪退。
+        if (cam->port) {
+            LOGI("Bypassing port destruction to prevent libusb crash");
+            cam->port = nullptr;
+        }
+
+        // 不调用 gp_camera_exit，直接 unref。因为设备已消失，exit 尝试通信会导致更多错误。
+        gp_camera_unref(cam);
     }
     if (g_context) {
-        gp_context_unref(g_context);
+        GPContext *ctx = g_context;
         g_context = nullptr;
+        gp_context_unref(ctx);
     }
     gp_port_usb_set_sys_device(-1);
 }
