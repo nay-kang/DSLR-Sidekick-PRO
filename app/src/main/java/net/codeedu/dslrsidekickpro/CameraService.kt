@@ -205,16 +205,18 @@ class CameraService : Service() {
             val connection = usbDeviceConnection
             if (connection != null) {
                 val fd = connection.fileDescriptor
+                val vendorId = device.vendorId
+                val productId = device.productId
                 Thread {
                     try {
-                        var result = connectToCamera(fd)
+                        var result = connectToCamera(fd, vendorId, productId)
                         var retryCount = 0
 
                         // 重试逻辑：最多重试2次
                         while (result != 0 && retryCount < 2) {
                             Log.w("CameraService", "Connection failed, retrying... (attempt ${retryCount + 2})")
                             Thread.sleep(1000)
-                            result = connectToCamera(fd)
+                            result = connectToCamera(fd, vendorId, productId)
                             retryCount++
                         }
 
@@ -615,7 +617,7 @@ class CameraService : Service() {
         }
     }
 
-    external fun connectToCamera(fd: Int): Int
+    external fun connectToCamera(fd: Int, vendorId: Int, productId: Int): Int
     external fun disconnectCameraNative()
     external fun pollEvent(timeoutMs: Int): String?
     external fun listFoldersInFolder(folderPath: String): Array<String>?

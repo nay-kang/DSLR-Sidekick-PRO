@@ -11,6 +11,7 @@
 
 #define LOG_TAG "DSLR-Native"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static std::mutex g_camera_mutex;
@@ -19,21 +20,78 @@ static std::mutex g_camera_mutex;
 static Camera *g_camera = nullptr;
 static GPContext *g_context = nullptr;
 
-// External gphoto2 internal function for Android USB FD injection
-
-
-static void log_func(GPLogLevel level, const char *domain, const char *str, void *data) {
-    if (level <= GP_LOG_ERROR) {
-        LOGE("[%d] %s: %s", level, domain, str);
-    } else {
-        LOGI("[%d] %s: %s", level, domain, str);
+// Helper function to convert CameraList to Java StringArray
+static jobjectArray cameraListToJavaArray(JNIEnv *env, CameraList *list) {
+    if (!list) return nullptr;
+    int count = gp_list_count(list);
+    jobjectArray array = env->NewObjectArray(count, env->FindClass("java/lang/String"), nullptr);
+    for (int i = 0; i < count; i++) {
+        const char *name;
+        if (gp_list_get_name(list, i, &name) == GP_OK) {
+            env->SetObjectArrayElement(array, i, env->NewStringUTF(name));
+        }
     }
+    gp_list_free(list);
+    return array;
+}
+
+// Dynamic camera name lookup using libgphoto2 abilities list
+static std::string getCameraModelName(uint16_t vendor_id, uint16_t product_id) {
+    CameraAbilitiesList *abilities_list = nullptr;
+    gp_abilities_list_new(&abilities_list);
+    
+    // Create temporary context for loading abilities
+    GPContext *temp_context = gp_context_new();
+    
+    // Load all camera abilities from gphoto2 database
+    int rc = gp_abilities_list_load(abilities_list, temp_context);
+    if (rc != GP_OK) {
+        LOGW("Failed to load gphoto2 abilities list: %d", rc);
+        gp_abilities_list_free(abilities_list);
+        gp_context_unref(temp_context);
+        
+        // Fallback: use generic name
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "PTP Camera (0x%04x:0x%04x)", vendor_id, product_id);
+        return {buffer};
+    }
+    
+    // Search for matching camera by USB IDs
+    int count = gp_abilities_list_count(abilities_list);
+    std::string model_name;
+    bool found = false;
+    
+    for (int i = 0; i < count; i++) {
+        CameraAbilities ab;
+        rc = gp_abilities_list_get_abilities(abilities_list, i, &ab);
+        if (rc == GP_OK && ab.usb_vendor == vendor_id && ab.usb_product == product_id) {
+            model_name = std::string(ab.model) + " (PTP mode)";
+            LOGI("Found camera in gphoto2 database: %s (index %d/%d)", ab.model, i, count);
+            found = true;
+            break;
+        }
+    }
+    
+    if (!found) {
+        LOGI("Camera not found in gphoto2 database (%d entries checked), using generic name", count);
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "PTP Camera (0x%04x:0x%04x)", vendor_id, product_id);
+        model_name = std::string(buffer);
+    }
+    
+    gp_abilities_list_free(abilities_list);
+    gp_context_unref(temp_context);
+    return model_name;
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_net_codeedu_dslrsidekickpro_CameraService_connectToCamera(JNIEnv *env, jobject thiz, jint fd) {
+Java_net_codeedu_dslrsidekickpro_CameraService_connectToCamera(JNIEnv *env, jobject thiz, jint fd, jint vendor_id, jint product_id) {
     LOCK_CAMERA;
-    LOGI("Initializing Nikon D610 Connection (FD: %d)", fd);
+    
+    // Get camera model name dynamically
+    std::string model_name = getCameraModelName((uint16_t)vendor_id, (uint16_t)product_id);
+    LOGI("Initializing %s (FD: %d, USB: 0x%04x:0x%04x)", 
+         model_name.c_str(), fd, vendor_id, product_id);
 
     // Disable libusb device discovery to bypass Android SELinux restrictions
     libusb_set_option(nullptr, LIBUSB_OPTION_NO_DEVICE_DISCOVERY, nullptr);
@@ -52,25 +110,34 @@ Java_net_codeedu_dslrsidekickpro_CameraService_connectToCamera(JNIEnv *env, jobj
 
     gp_port_usb_set_sys_device(fd);
     g_context = gp_context_new();
-    gp_log_add_func(GP_LOG_VERBOSE, log_func, nullptr);
+    // 注释掉日志函数注册，减少性能开销
+    // gp_log_add_func(GP_LOG_VERBOSE, log_func, nullptr);
 
     int rc = gp_camera_new(&g_camera);
     if (rc != GP_OK) return rc;
 
-    // Inject Nikon D610 Capabilities
+    // Set camera abilities dynamically based on USB IDs
     CameraAbilities ab;
     memset(&ab, 0, sizeof(ab));
-    strncpy(ab.model, "Nikon DSC D610 (PTP mode)", sizeof(ab.model) - 1);
-    ab.model[sizeof(ab.model) - 1] = '\0';  // 确保null终止
+    
+    // Set model name
+    strncpy(ab.model, model_name.c_str(), sizeof(ab.model) - 1);
+    ab.model[sizeof(ab.model) - 1] = '\0';
+    
+    // Use PTP2 driver for all modern DSLRs
     strncpy(ab.library, "ptp2", sizeof(ab.library) - 1);
-    ab.library[sizeof(ab.library) - 1] = '\0';  // 确保null终止
+    ab.library[sizeof(ab.library) - 1] = '\0';
+    
     ab.status = GP_DRIVER_STATUS_PRODUCTION;
     ab.operations = (CameraOperation)(GP_OPERATION_CAPTURE_IMAGE | GP_OPERATION_CONFIG | GP_OPERATION_CAPTURE_PREVIEW);
     ab.file_operations = (CameraFileOperation)(GP_FILE_OPERATION_DELETE | GP_FILE_OPERATION_PREVIEW | GP_FILE_OPERATION_EXIF);
     ab.folder_operations = (CameraFolderOperation)(GP_FOLDER_OPERATION_DELETE_ALL | GP_FOLDER_OPERATION_MAKE_DIR);
-    ab.usb_vendor = 0x04b0;
-    ab.usb_product = 0x0432;
+    
+    // Set USB vendor and product IDs from parameters
+    ab.usb_vendor = (uint16_t)vendor_id;
+    ab.usb_product = (uint16_t)product_id;
     ab.device_type = GP_DEVICE_STILL_CAMERA;
+    
     gp_camera_set_abilities(g_camera, ab);
 
     // Port Configuration
@@ -153,7 +220,7 @@ Java_net_codeedu_dslrsidekickpro_CameraService_pollEvent(JNIEnv *env, jobject th
 
     if (rc == GP_OK && data != nullptr) {
         if (type == GP_EVENT_FILE_ADDED || type == GP_EVENT_FILE_CHANGED) {
-            CameraFilePath *path = (CameraFilePath *)data;
+            auto *path = (CameraFilePath *)data;
             std::string folderStr = (path->folder[0] == '/') ? path->folder : ("/" + std::string(path->folder));
             std::string full_path = folderStr + (folderStr.back() == '/' ? "" : "/") + path->name;
             free(data);
@@ -173,16 +240,11 @@ Java_net_codeedu_dslrsidekickpro_CameraService_listFoldersInFolder(JNIEnv *env, 
     gp_list_new(&list);
     int rc = gp_camera_folder_list_folders(g_camera, path, list, g_context);
     env->ReleaseStringUTFChars(folder_path, path);
-    if (rc != GP_OK) { gp_list_free(list); return nullptr; }
-    int count = gp_list_count(list);
-    jobjectArray array = env->NewObjectArray(count, env->FindClass("java/lang/String"), nullptr);
-    for (int i = 0; i < count; i++) {
-        const char *name;
-        gp_list_get_name(list, i, &name);
-        env->SetObjectArrayElement(array, i, env->NewStringUTF(name));
+    if (rc != GP_OK) { 
+        gp_list_free(list); 
+        return nullptr; 
     }
-    gp_list_free(list);
-    return array;
+    return cameraListToJavaArray(env, list);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
@@ -194,16 +256,11 @@ Java_net_codeedu_dslrsidekickpro_CameraService_listFilesInFolder(JNIEnv *env, jo
     gp_list_new(&list);
     int rc = gp_camera_folder_list_files(g_camera, path, list, g_context);
     env->ReleaseStringUTFChars(folder_path, path);
-    if (rc != GP_OK) { gp_list_free(list); return nullptr; }
-    int count = gp_list_count(list);
-    jobjectArray array = env->NewObjectArray(count, env->FindClass("java/lang/String"), nullptr);
-    for (int i = 0; i < count; i++) {
-        const char *name;
-        gp_list_get_name(list, i, &name);
-        env->SetObjectArrayElement(array, i, env->NewStringUTF(name));
+    if (rc != GP_OK) { 
+        gp_list_free(list); 
+        return nullptr; 
     }
-    gp_list_free(list);
-    return array;
+    return cameraListToJavaArray(env, list);
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
