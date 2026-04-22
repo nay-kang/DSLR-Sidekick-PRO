@@ -6,6 +6,7 @@ import android.view.ViewGroup
 import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
+import com.bumptech.glide.load.engine.DiskCacheStrategy
 
 class PhotoAdapter(
     private val photos: MutableList<String>,
@@ -27,6 +28,7 @@ class PhotoAdapter(
         Glide.with(holder.imageView.context)
             .load(path)
             .centerCrop()
+            .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // Optimize for large DSLR images
             .into(holder.imageView)
         
         holder.itemView.setOnClickListener { onClick(path) }

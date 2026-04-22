@@ -25,8 +25,7 @@ class PhotoPagerAdapter(
         // 使用 Glide 异步加载图片，解决主线程解码导致的卡顿
         Glide.with(holder.photoView.context)
             .load(path)
-            .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // Use RESOURCE cache for better performance with large images
-            .skipMemoryCache(false)
+            .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // Optimize for large DSLR images
             .into(holder.photoView)
     }
 

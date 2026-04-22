@@ -16,7 +16,6 @@ import android.content.ContentValues
 import android.provider.MediaStore
 import java.util.concurrent.Executors
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicInteger
 import android.net.Uri
 
 class CameraService : Service() {
@@ -296,15 +295,14 @@ class CameraService : Service() {
         Log.i("CameraService", "Starting photo sync...")
         // Single thread executor for sync tasks to avoid concurrency issues with gphoto2 context
         val syncExecutor = Executors.newSingleThreadExecutor()
-        val downloadedCount = AtomicInteger(0)
         syncExecutor.execute {
+            val downloadedCountRef = intArrayOf(0)
             try {
                 updateStatus(CameraStatus.SYNCING)
                 // 优化: 缩短相机初始化等待时间到500ms
                 Thread.sleep(500)
 
-                val existingFiles = getExistingPublicPhotos()
-                Log.d("CameraService", "Existing photos in gallery: ${existingFiles.size}")
+                val (existingFiles, maxLocalSequence) = getExistingPublicPhotos()
 
                 // Tracks full camera paths already downloaded during this sync run to prevent duplicates
                 val downloadedPaths = mutableSetOf<String>()
@@ -329,30 +327,31 @@ class CameraService : Service() {
                 listeners.forEach { it.onSyncProgress(0, if (totalCandidates > 0) totalCandidates else -1) }
 
                 // 1. Try common DCIM path
-                scanFolderRecursive("/DCIM", existingFiles, downloadedPaths, downloadedCount, totalCandidates)
+                scanFolderRecursive("/DCIM", existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
 
                 // 2. Scan root for storage volumes
                 val rootFolders = listFoldersInFolder("/") ?: emptyArray()
                 rootFolders.forEach { store ->
                     if (store.equals("DCIM", ignoreCase = true)) return@forEach
                     val path = if (store.startsWith("/")) store else "/$store"
-                    scanFolderRecursive(path, existingFiles, downloadedPaths, downloadedCount, totalCandidates)
-                    scanFolderRecursive("$path/DCIM", existingFiles, downloadedPaths, downloadedCount, totalCandidates)
+                    scanFolderRecursive(path, existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
+                    scanFolderRecursive("$path/DCIM", existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
                 }
             } catch (e: Exception) {
-                    Log.e("CameraService", "Sync error", e)
+                Log.e("CameraService", "Sync error", e)
             } finally {
-                // 确保 executor 被关闭，防止资源泄漏
-                syncExecutor.shutdown()
+                // Ensure we report the final count and shutdown executor even if an exception occurred
                 Log.i("CameraService", "Photo sync completed")
                 try {
-                    listeners.forEach { it.onSyncCompleted(downloadedCount.get()) }
+                    listeners.forEach { it.onSyncCompleted(downloadedCountRef[0]) }
                     if (isCameraConnected) {
                         updateStatus(CameraStatus.CONNECTED)
                     }
                 } catch (e: Exception) {
                     Log.e("CameraService", "Error notifying sync completion", e)
                 }
+                // 确保 executor 被关闭，防止资源泄漏
+                syncExecutor.shutdown()
             }
         }
     }
@@ -361,8 +360,9 @@ class CameraService : Service() {
         path: String,
         existingFiles: MutableSet<String>,
         downloadedPaths: MutableSet<String>,
-        downloadedCount: AtomicInteger,
-        totalCount: Int
+        downloadedCountRef: IntArray, // Use IntArray as mutable reference in single-thread context
+        totalCount: Int,
+        maxLocalSequence: Int = 0 // Optimization: skip files with sequence <= this
     ) {
         if (!isCameraConnected) return
 
@@ -371,12 +371,13 @@ class CameraService : Service() {
             folders?.forEach { sub ->
                 if (!sub.startsWith(".") && sub != "MISC") {
                     val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
-                    scanFolderRecursive(subPath, existingFiles, downloadedPaths, downloadedCount, totalCount)
+                    scanFolderRecursive(subPath, existingFiles, downloadedPaths, downloadedCountRef, totalCount, maxLocalSequence)
                 }
             }
 
             val files = listFilesInFolder(path)
             // 优化: RAW+JPG模式下,只同步JPG文件用于快速预览
+            // Files are typically sorted by name, so we iterate in reverse (newest first)
             files?.filter { 
                 it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg")
             }?.reversed()?.forEach { fileName ->
@@ -390,15 +391,23 @@ class CameraService : Service() {
 
                 // Skip if a file with same display name already exists in gallery
                 if (existingFiles.contains(fileName)) {
-                    // Non-critical info — use DEBUG to avoid noisy logs in production
-                    Log.d("CameraService", "Skipping (already in gallery): $fileName")
-                    // still mark as downloaded path to avoid revisiting same camera file
                     downloadedPaths.add(fullPathKey)
                     return@forEach
                 }
 
+                // OPTIMIZATION: Check sequence number to skip old files
+                if (maxLocalSequence > 0) {
+                    val fileSequence = extractSequenceNumber(fileName)
+                    if (fileSequence > 0 && fileSequence <= maxLocalSequence) {
+                        // This file is older or equal to what we already have, skip it
+                        Log.d("CameraService", "Skipping old file (seq $fileSequence <= max $maxLocalSequence): $fileName")
+                        downloadedPaths.add(fullPathKey)
+                        return@forEach
+                    }
+                }
+
                 // Per-file sync events are verbose; log at DEBUG level
-                Log.d("CameraService", "Syncing new file: $fullPathKey")
+                Log.i("CameraService", "Syncing new file: $fileName")
                 val data = downloadFileWithTimeout(path, fileName)
                 if (data != null) {
                     val uri = saveToPublicGallery(fileName, data)
@@ -413,8 +422,8 @@ class CameraService : Service() {
 
                         // update progress
                         try {
-                            val cur = downloadedCount.incrementAndGet()
-                            listeners.forEach { listener -> listener.onSyncProgress(cur, if (totalCount > 0) totalCount else -1) }
+                            downloadedCountRef[0]++
+                            listeners.forEach { listener -> listener.onSyncProgress(downloadedCountRef[0], if (totalCount > 0) totalCount else -1) }
                         } catch (e: Exception) {
                             Log.e("CameraService", "Progress notify error", e)
                         }
@@ -423,6 +432,21 @@ class CameraService : Service() {
             }
         } catch (e: Exception) {
             Log.e("CameraService", "Error scanning folder: $path", e)
+        }
+    }
+
+    /**
+     * Extract sequence number from filename (e.g., "DSC_1234.JPG" -> 1234)
+     * Returns 0 if no sequence number found
+     */
+    private fun extractSequenceNumber(fileName: String): Int {
+        return try {
+            // Common patterns: DSC_0001.JPG, IMG_0001.JPG, etc.
+            val regex = Regex("(\\d+)")
+            val match = regex.find(fileName)
+            match?.value?.toIntOrNull() ?: 0
+        } catch (_: Exception) {
+            0
         }
     }
 
@@ -500,8 +524,9 @@ class CameraService : Service() {
         }
     }
 
-    private fun getExistingPublicPhotos(): MutableSet<String> {
+    private fun getExistingPublicPhotos(): Pair<MutableSet<String>, Int> {
         val names = mutableSetOf<String>()
+        var maxSequenceNumber = 0
         val projection = arrayOf(MediaStore.Images.Media.DISPLAY_NAME)
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         
@@ -515,10 +540,18 @@ class CameraService : Service() {
 
         try {
             contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
-                val index = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-                if (index != -1) {
+                val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                if (nameIndex != -1) {
                     while (cursor.moveToNext()) {
-                        cursor.getString(index)?.let { names.add(it) }
+                        val fileName = cursor.getString(nameIndex)
+                        fileName?.let { 
+                            names.add(it)
+                            // Extract sequence number to find the max
+                            val seqNum = extractSequenceNumber(it)
+                            if (seqNum > maxSequenceNumber) {
+                                maxSequenceNumber = seqNum
+                            }
+                        }
                     }
                 }
             }
@@ -527,7 +560,8 @@ class CameraService : Service() {
             // Fallback: return empty set to allow sync to continue
             Log.w("CameraService", "Using fallback: treating all photos as new")
         }
-        return names
+        Log.i("CameraService", "Found ${names.size} existing photos, max sequence: $maxSequenceNumber")
+        return Pair(names, maxSequenceNumber)
     }
 
     private fun getRealPathFromURI(uri: Uri): String? {

@@ -1,8 +1,6 @@
 package net.codeedu.dslrsidekickpro
 
 import android.content.*
-import com.bumptech.glide.Glide
-import com.bumptech.glide.load.engine.DiskCacheStrategy
 import androidx.exifinterface.media.ExifInterface
 import java.io.File
 import kotlinx.coroutines.*
@@ -20,9 +18,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.viewpager2.widget.ViewPager2
-import com.bumptech.glide.load.resource.bitmap.BitmapTransformation
-import com.bumptech.glide.load.engine.bitmap_recycle.BitmapPool
-import java.security.MessageDigest
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -30,46 +25,7 @@ import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.tasks.await
 import android.util.Log
 import android.net.Uri
-
-class CenterCropRegionTransformation(private val targetPoint: android.graphics.Point? = null) : BitmapTransformation() {
-    override fun transform(pool: BitmapPool, toTransform: Bitmap, outWidth: Int, outHeight: Int): Bitmap {
-        val centerX: Int
-        val centerY: Int
-
-        if (targetPoint != null) {
-            centerX = targetPoint.x
-            centerY = targetPoint.y
-            Log.d("CenterCrop", "Target point: ($centerX, $centerY), Output size: ${outWidth}x${outHeight}, Source size: ${toTransform.width}x${toTransform.height}")
-        } else {
-            centerX = toTransform.width / 2
-            centerY = toTransform.height / 2
-            Log.d("CenterCrop", "Using center point: ($centerX, $centerY)")
-        }
-
-        // 计算裁剪区域，确保不超出图片边界
-        var left = centerX - outWidth / 2
-        var top = centerY - outHeight / 2
-        
-        // 边界检查
-        left = left.coerceIn(0, (toTransform.width - outWidth).coerceAtLeast(0))
-        top = top.coerceIn(0, (toTransform.height - outHeight).coerceAtLeast(0))
-        
-        val width = outWidth.coerceAtMost(toTransform.width - left)
-        val height = outHeight.coerceAtMost(toTransform.height - top)
-        
-        Log.d("CenterCrop", "Cropping from ($left, $top) with size ${width}x${height}")
-        
-        return Bitmap.createBitmap(toTransform, left, top, width, height)
-    }
-
-    override fun updateDiskCacheKey(messageDigest: MessageDigest) {
-        messageDigest.update("eye_crop_100_v2".toByteArray())
-        targetPoint?.let { 
-            messageDigest.update(it.x.toString().toByteArray())
-            messageDigest.update(it.y.toString().toByteArray())
-        }
-    }
-}
+import androidx.core.net.toUri
 
 class MainActivity : AppCompatActivity() {
 
@@ -129,8 +85,11 @@ class MainActivity : AppCompatActivity() {
                 // 检查path是否已存在，避免重复
                 if (!allPhotos.contains(displayPath)) {
                     allPhotos.add(0, displayPath)
-                    pagerAdapter.notifyItemInserted(0)
-                    pagerAdapter.notifyDataSetChanged() // 确保 ViewPager 刷新
+                    
+                    // ViewPager2 在位置 0 插入时的特殊处理
+                    // 必须使用 notifyDataSetChanged 以确保正确更新
+                    @Suppress("NotifyDataSetChanged")
+                    pagerAdapter.notifyDataSetChanged()
                     
                     // 优化: 立即显示加载状态,提升用户感知速度
                     if (fromLiveEvent) {
@@ -271,7 +230,7 @@ class MainActivity : AppCompatActivity() {
         val file = if (!isContent) File(path) else null
         if (!isContent && (file == null || !file.exists())) return
 
-        val fileName = if (file != null) file.name else Uri.parse(path).lastPathSegment ?: "Unknown"
+        val fileName = if (file != null) file.name else path.toUri().lastPathSegment ?: "Unknown"
         
         mainScope.launch {
             // 1. 获取 EXIF
@@ -279,16 +238,15 @@ class MainActivity : AppCompatActivity() {
             val exifData = withContext(Dispatchers.IO) {
                 try {
                     val exif = if (isContent) {
-                        val uri = Uri.parse(path)
+                        val uri = path.toUri()
                         contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
                     } else {
                         ExifInterface(path)
                     }
                     val aperture = exif?.getAttribute(ExifInterface.TAG_F_NUMBER) ?: "--"
                     val shutter = exif?.getAttribute(ExifInterface.TAG_EXPOSURE_TIME) ?: "--"
-                    val iso = exif?.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)
-                        ?: exif?.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY)
-                        ?: "--"
+                    // 使用 TAG_PHOTOGRAPHIC_SENSITIVITY 替代已弃用的 TAG_ISO_SPEED_RATINGS
+                    val iso = exif?.getAttribute(ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY) ?: "--"
                     val focalLength = formatFocalLength(exif?.getAttribute(ExifInterface.TAG_FOCAL_LENGTH))
                     "f/$aperture   ${formatShutter(shutter)}s   ISO $iso   ${focalLength}mm"
                 } catch (e: Exception) {
@@ -306,7 +264,7 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val options = BitmapFactory.Options().apply { inSampleSize = 8 }
                     bitmap = if (isContent) {
-                        val uri = Uri.parse(path)
+                        val uri = path.toUri()
                         contentResolver.openInputStream(uri)?.use { stream -> BitmapFactory.decodeStream(stream, null, options) }
                     } else {
                         BitmapFactory.decodeFile(path, options)
@@ -376,7 +334,7 @@ class MainActivity : AppCompatActivity() {
                 // 优先级2: 尝试从EXIF获取对焦点位置
                 try {
                     val exif = if (isContent) {
-                        val uri = Uri.parse(path)
+                        val uri = path.toUri()
                         contentResolver.openInputStream(uri)?.use { ExifInterface(it) }
                     } else {
                         ExifInterface(path)
@@ -399,7 +357,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     Log.d("MainActivity", "No AF point in EXIF, will use center")
                 }
                 
@@ -411,62 +369,60 @@ class MainActivity : AppCompatActivity() {
             // 3. 加载并裁剪图片
             Log.d("MainActivity", "Loading detail image with crop center: $cropCenter")
             
-            mainScope.launch {
-                val croppedBitmap = withContext(Dispatchers.IO) {
-                    try {
-                        // 加载原图
-                        val originalBitmap = if (isContent) {
-                            val uri = Uri.parse(path)
-                            contentResolver.openInputStream(uri)?.use { stream ->
-                                BitmapFactory.decodeStream(stream)
-                            }
-                        } else {
-                            BitmapFactory.decodeFile(path)
+            val croppedBitmap = withContext(Dispatchers.IO) {
+                try {
+                    // 加载原图
+                    val originalBitmap = if (isContent) {
+                        val uri = path.toUri()
+                        contentResolver.openInputStream(uri)?.use { stream ->
+                            BitmapFactory.decodeStream(stream)
                         }
-                        
-                        if (originalBitmap == null) {
-                            Log.e("MainActivity", "Failed to load original bitmap")
-                            return@withContext null
-                        }
-                        
-                        Log.d("MainActivity", "Original bitmap loaded: ${originalBitmap.width}x${originalBitmap.height}")
-                        
-                        // 计算裁剪区域
-                        val cropSize = 300.dpToPx() // 使用focusCheckCard的高度
-                        val centerX = cropCenter?.x ?: (originalBitmap.width / 2)
-                        val centerY = cropCenter?.y ?: (originalBitmap.height / 2)
-                        
-                        var left = centerX - cropSize / 2
-                        var top = centerY - cropSize / 2
-                        
-                        // 边界检查
-                        left = left.coerceIn(0, (originalBitmap.width - cropSize).coerceAtLeast(0))
-                        top = top.coerceIn(0, (originalBitmap.height - cropSize).coerceAtLeast(0))
-                        
-                        val width = cropSize.coerceAtMost(originalBitmap.width - left)
-                        val height = cropSize.coerceAtMost(originalBitmap.height - top)
-                        
-                        Log.d("CenterCrop", "Cropping from ($left, $top) size ${width}x${height}, center: ($centerX, $centerY)")
-                        
-                        // 执行裁剪
-                        val cropped = Bitmap.createBitmap(originalBitmap, left, top, width, height)
-                        originalBitmap.recycle() // 释放原图内存
-                        
-                        Log.d("MainActivity", "✅ Cropped bitmap: ${cropped.width}x${cropped.height}")
-                        cropped
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "❌ Crop error", e)
-                        null
+                    } else {
+                        BitmapFactory.decodeFile(path)
                     }
+                    
+                    if (originalBitmap == null) {
+                        Log.e("MainActivity", "Failed to load original bitmap")
+                        return@withContext null
+                    }
+                    
+                    Log.d("MainActivity", "Original bitmap loaded: ${originalBitmap.width}x${originalBitmap.height}")
+                    
+                    // 计算裁剪区域
+                    val cropSize = 300.dpToPx() // 使用focusCheckCard的高度
+                    val centerX = cropCenter?.x ?: (originalBitmap.width / 2)
+                    val centerY = cropCenter?.y ?: (originalBitmap.height / 2)
+                    
+                    var left = centerX - cropSize / 2
+                    var top = centerY - cropSize / 2
+                    
+                    // 边界检查
+                    left = left.coerceIn(0, (originalBitmap.width - cropSize).coerceAtLeast(0))
+                    top = top.coerceIn(0, (originalBitmap.height - cropSize).coerceAtLeast(0))
+                    
+                    val width = cropSize.coerceAtMost(originalBitmap.width - left)
+                    val height = cropSize.coerceAtMost(originalBitmap.height - top)
+                    
+                    Log.d("CenterCrop", "Cropping from ($left, $top) size ${width}x${height}, center: ($centerX, $centerY)")
+                    
+                    // 执行裁剪
+                    val cropped = Bitmap.createBitmap(originalBitmap, left, top, width, height)
+                    originalBitmap.recycle() // 释放原图内存
+                    
+                    Log.d("MainActivity", "✅ Cropped bitmap: ${cropped.width}x${cropped.height}")
+                    cropped
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "❌ Crop error", e)
+                    null
                 }
-                
-                // 在主线程设置图片
-                if (croppedBitmap != null) {
-                    focusCheckImageView.setImageBitmap(croppedBitmap)
-                    updateStatus("Ready: $fileName", isCameraConnected)
-                } else {
-                    Log.e("MainActivity", "Failed to create cropped bitmap")
-                }
+            }
+            
+            // 在主线程设置图片
+            if (croppedBitmap != null) {
+                focusCheckImageView.setImageBitmap(croppedBitmap)
+                updateStatus("Ready: $fileName", isCameraConnected)
+            } else {
+                Log.e("MainActivity", "Failed to create cropped bitmap")
             }
         }
     }
@@ -538,7 +494,7 @@ class MainActivity : AppCompatActivity() {
                     "1/$denominator"
                 }
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             shutter
         }
     }
@@ -576,7 +532,7 @@ class MainActivity : AppCompatActivity() {
                     String.format("%.1f", value)
                 }
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             "--"
         }
     }

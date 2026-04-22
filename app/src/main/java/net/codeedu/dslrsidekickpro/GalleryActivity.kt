@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import com.google.android.material.snackbar.Snackbar
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -17,10 +18,11 @@ import android.hardware.usb.UsbManager
 import android.os.IBinder
 import android.os.Parcelable
 import android.view.WindowManager
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -34,6 +36,7 @@ class GalleryActivity : AppCompatActivity() {
     private var isBound = false
 
     private var pendingScrollState: Parcelable? = null
+    private val mainScope = CoroutineScope(Dispatchers.Main + Job())
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -62,6 +65,10 @@ class GalleryActivity : AppCompatActivity() {
             runOnUiThread {
                 val displayPath = realPath ?: uri.toString()
                 adapter.addPhoto(displayPath)
+                
+                // Scroll to top to show the newest photo
+                recyclerView.smoothScrollToPosition(0)
+                
                 if (fromLiveEvent) {
                     val intent = Intent(this@GalleryActivity, MainActivity::class.java)
                     intent.putExtra("photo_path", displayPath)
@@ -88,9 +95,12 @@ class GalleryActivity : AppCompatActivity() {
             runOnUiThread {
                 val msg = if (total >= 0) "Sync completed: $total new photos" else "Sync completed"
                 syncSnackbar?.setText(msg)
-                syncSnackbar?.setDuration(3000)
+                syncSnackbar?.duration = 3000
                 syncSnackbar?.show()
                 syncSnackbar = null
+                
+                // 同步完成后重新加载照片列表以确保正确排序
+                loadPhotos()
             }
         }
     }
@@ -106,30 +116,20 @@ class GalleryActivity : AppCompatActivity() {
         setContentView(R.layout.activity_gallery)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Request notification permission for Android 13+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) 
-                != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
-                    REQUEST_NOTIFICATION_PERMISSION
-                )
-            }
-        }
-
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
         recyclerView = findViewById(R.id.galleryRecyclerView)
         recyclerView.layoutManager = GridLayoutManager(this, 4)
 
-        loadPhotos()
         adapter = PhotoAdapter(photoList) { path ->
             val intent = Intent(this, MainActivity::class.java)
             intent.putExtra("photo_path", path)
             startActivity(intent)
         }
         recyclerView.adapter = adapter
+
+        // Load photos in background thread to avoid UI blocking
+        loadPhotos()
 
         // 在布局完成后恢复滚动状态（处理 Activity 重建）
         if (pendingScrollState != null) {
@@ -199,35 +199,39 @@ class GalleryActivity : AppCompatActivity() {
     }
 
     private fun loadPhotos() {
-        // Example implementation: Load photos from a predefined directory
-        val projection = arrayOf(MediaStore.Images.Media.DATA)
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
-        val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
+        mainScope.launch {
+            withContext(Dispatchers.IO) {
+                val projection = arrayOf(MediaStore.Images.Media.DATA)
+                val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+                val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
+                // 按拍摄时间倒序排列（最新的在前）
+                val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
 
-        contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            sortOrder
-        )?.use { cursor ->
-            val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-            while (cursor.moveToNext()) {
-                photoList.add(cursor.getString(index))
+                contentResolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    projection,
+                    selection,
+                    selectionArgs,
+                    sortOrder
+                )?.use { cursor ->
+                    val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+                    val photos = mutableListOf<String>()
+                    while (cursor.moveToNext()) {
+                        photos.add(cursor.getString(index))
+                    }
+                    // Update UI on main thread
+                    withContext(Dispatchers.Main) {
+                        photoList.clear()
+                        photoList.addAll(photos)
+                        adapter.notifyDataSetChanged()
+                        
+                        // Scroll to top to show newest photos
+                        recyclerView.scrollToPosition(0)
+                    }
+                } ?: run {
+                    Log.w("GalleryActivity", "Failed to query photos")
+                }
             }
         }
-    }
-
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        // 保存状态用于 Activity 重建
-        recyclerView.layoutManager?.onSaveInstanceState()?.let {
-            outState.putParcelable("recycler_state", it)
-        }
-    }
-
-    companion object {
-        private const val REQUEST_NOTIFICATION_PERMISSION = 1001
     }
 }
