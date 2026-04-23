@@ -51,6 +51,9 @@ class MainActivity : AppCompatActivity() {
     private var cameraService: CameraService? = null
     private var isBound = false
 
+    private var updateDetailJob: Job? = null
+    private var lastDetailPath: String? = null
+
     private val requestFolderLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri: Uri? ->
@@ -102,22 +105,33 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
-            val path = uri.toString()
-            Log.d("MainActivity", "New photo received: $path")
-            
-            // If it's a new photo (not from a full sync), add to the top
-            if (!allPhotos.contains(path)) {
-                allPhotos.add(0, path)
-                pagerAdapter.notifyItemInserted(0)
+            runOnUiThread {
+                val path = uri.toString()
+                Log.d("MainActivity", "New photo received: $path (live: $fromLiveEvent)")
                 
-                // If it's the first photo or from sync, auto-focus it
-                if (allPhotos.size == 1 || fromLiveEvent) {
-                    photoViewPager.setCurrentItem(0, true)
+                val isNew = !allPhotos.contains(path)
+                if (isNew) {
+                    allPhotos.add(0, path)
+                    pagerAdapter.notifyItemInserted(0)
                 }
-            } else {
-                // If it's already there, just navigate to it
-                val index = allPhotos.indexOf(path)
-                photoViewPager.setCurrentItem(index, true)
+                
+                // For live events (taking a picture) or the very first photo, always jump to it
+                if (fromLiveEvent || allPhotos.size == 1) {
+                    val index = allPhotos.indexOf(path)
+                    if (index != -1) {
+                        // Use a post to ensure notifyItemInserted has finished its layout
+                        photoViewPager.post {
+                            photoViewPager.setCurrentItem(index, true)
+                            // ViewPager2's onPageSelected might not trigger if index is 0, so force it
+                            if (index == 0) {
+                                updateDetailViews(path)
+                            }
+                        }
+                    }
+                } else if (photoViewPager.currentItem == 0) {
+                    // Even if it's not a live event, if we're at index 0 and a new photo is inserted at 0
+                    updateDetailViews(path)
+                }
             }
         }
 
@@ -126,14 +140,17 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onSyncCompleted(total: Int) {
-            updateStatus("Sync Complete: $total photos", isCameraConnected)
-            loadAllPhotos() // Refresh list
+            runOnUiThread {
+                updateStatus("Sync Complete: $total photos", isCameraConnected)
+                loadAllPhotos() // Refresh list
+            }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         enableImmersiveMode()
 
         statusBarStatus = findViewById(R.id.statusBarStatus)
@@ -259,7 +276,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateDetailViews(path: String) {
-        mainScope.launch {
+        if (path == lastDetailPath && updateDetailJob?.isActive == true) return
+        lastDetailPath = path
+
+        updateDetailJob?.cancel()
+        updateDetailJob = mainScope.launch {
             val isContent = path.startsWith("content://")
             
             // 1. 获取文件名 (仅显示文件名，不显示完整路径或 Document ID)
