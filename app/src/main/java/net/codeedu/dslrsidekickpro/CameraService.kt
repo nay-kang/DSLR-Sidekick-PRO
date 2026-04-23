@@ -12,11 +12,14 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import android.content.ContentValues
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import java.util.concurrent.Executors
 import java.util.concurrent.CopyOnWriteArrayList
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import androidx.preference.PreferenceManager
+import androidx.core.net.toUri
 
 class CameraService : Service() {
 
@@ -412,7 +415,7 @@ class CameraService : Service() {
                 Log.i("CameraService", "Syncing new file: $fileName")
                 val data = downloadFileWithTimeout(path, fileName)
                 if (data != null) {
-                    val uri = saveToPublicGallery(fileName, data)
+                    val uri = saveToSelectedFolder(fileName, data)
                     if (uri != null) {
                         // Add to existingFiles so further scans in this run won't re-download by name
                         existingFiles.add(fileName)
@@ -475,7 +478,7 @@ class CameraService : Service() {
                                 // 添加超时机制下载文件
                                 val imageData = downloadFileWithTimeout(folder, fileName)
                                 if (imageData != null) {
-                                    val uri = saveToPublicGallery(fileName, imageData)
+                                    val uri = saveToSelectedFolder(fileName, imageData)
                                     uri?.let {
                                         val realPath = getRealPathFromURI(it)
                                         listeners.forEach { listener -> listener.onNewPhoto(it, realPath, true) }
@@ -496,72 +499,71 @@ class CameraService : Service() {
         }
     }
 
-    private fun saveToPublicGallery(fileName: String, data: ByteArray): Uri? {
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/DSLR_Sidekick")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
+    private fun saveToSelectedFolder(fileName: String, data: ByteArray): Uri? {
+        val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this)
+            .getString("sync_folder_uri", null) ?: return null
+            
+        val folderUri = folderUriStr.toUri()
+        val rootTree = DocumentFile.fromTreeUri(this, folderUri) ?: return null
+        
+        // Ensure folder exists and we have access
+        if (!rootTree.exists() || !rootTree.canWrite()) {
+             return null
         }
-        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-        val uri = contentResolver.insert(collection, values) ?: return null
-        try {
-            contentResolver.openOutputStream(uri)?.use { it.write(data) }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                contentResolver.update(uri, values, null, null)
-            }
-            return uri
+
+        val file = rootTree.createFile("image/jpeg", fileName) ?: return null
+        
+        return try {
+            contentResolver.openOutputStream(file.uri)?.use { it.write(data) }
+            file.uri
         } catch (e: Exception) {
-            Log.e("CameraService", "Error saving to gallery", e)
-            contentResolver.delete(uri, null, null)
-            return null
+            Log.e("CameraService", "Error saving to SAF folder", e)
+            null
         }
     }
 
     private fun getExistingPublicPhotos(): Pair<MutableSet<String>, Int> {
         val names = mutableSetOf<String>()
         var maxSequenceNumber = 0
-        val projection = arrayOf(MediaStore.Images.Media.DISPLAY_NAME)
-        val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         
-        // 使用更宽泛的查询方式，确保兼容性
-        val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        } else {
-            "${MediaStore.Images.Media.DATA} LIKE ?"
-        }
-        val selectionArgs = arrayOf("%DSLR_Sidekick%")
+        val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this)
+            .getString("sync_folder_uri", null)
+        
+        if (folderUriStr != null) {
+            try {
+                val treeUri = folderUriStr.toUri()
+                val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, DocumentsContract.getTreeDocumentId(treeUri))
 
-        try {
-            contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
-                val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-                if (nameIndex != -1) {
+                contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                    ),
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    
                     while (cursor.moveToNext()) {
-                        val fileName = cursor.getString(nameIndex)
-                        fileName?.let { 
-                            names.add(it)
-                            // Extract sequence number to find the max
-                            val seqNum = extractSequenceNumber(it)
+                        val name = cursor.getString(nameIdx)
+                        val mime = cursor.getString(mimeIdx)
+                        if (name != null && (mime?.startsWith("image/") == true || name.lowercase().endsWith(".jpg") || name.lowercase().endsWith(".jpeg"))) {
+                            names.add(name)
+                            val seqNum = extractSequenceNumber(name)
                             if (seqNum > maxSequenceNumber) {
                                 maxSequenceNumber = seqNum
                             }
                         }
                     }
                 }
+            } catch (e: Exception) {
+                Log.e("CameraService", "Error listing SAF folder via DocumentsContract", e)
             }
-        } catch (e: Exception) {
-            Log.e("CameraService", "Error querying MediaStore", e)
-            // Fallback: return empty set to allow sync to continue
-            Log.w("CameraService", "Using fallback: treating all photos as new")
         }
+
         Log.i("CameraService", "Found ${names.size} existing photos, max sequence: $maxSequenceNumber")
         return Pair(names, maxSequenceNumber)
     }

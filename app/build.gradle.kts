@@ -75,6 +75,8 @@ dependencies {
     
     implementation(libs.androidx.exifinterface)
     implementation(libs.google.mlkit.face.detection)
+    implementation(libs.androidx.documentfile)
+    implementation(libs.androidx.preference.ktx)
     
     implementation(libs.glide)
     ksp(libs.glide.ksp)

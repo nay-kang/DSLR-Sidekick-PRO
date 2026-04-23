@@ -6,67 +6,89 @@ import java.io.File
 import kotlinx.coroutines.*
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.provider.MediaStore
+import android.provider.DocumentsContract
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowCompat
 import androidx.viewpager2.widget.ViewPager2
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
-import kotlinx.coroutines.tasks.await
-import android.util.Log
+import androidx.preference.PreferenceManager
 import android.net.Uri
 import androidx.core.net.toUri
+import kotlinx.coroutines.tasks.await
+import android.graphics.Point
+import androidx.core.content.edit
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var statusBarStatus: TextView
     private lateinit var connectionIndicator: View
     private lateinit var exifInfoTextView: TextView
     private lateinit var photoViewPager: ViewPager2
     private lateinit var focusCheckImageView: android.widget.ImageView
     private lateinit var btnGallery: Button
-    
+
     private var currentPhotoPath: String? = null
     private val allPhotos = mutableListOf<String>()
-    private var currentPhotoIndex = -1
+    private var currentPhotoIndex = 0
     private lateinit var pagerAdapter: PhotoPagerAdapter
-    private var isCameraConnected: Boolean = false
+    private var isCameraConnected = false
 
     private var cameraService: CameraService? = null
     private var isBound = false
 
-    private val faceDetector by lazy {
-        val options = FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+    private val requestFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        uri?.let {
+            // Persist permission
+            val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            contentResolver.takePersistableUriPermission(it, takeFlags)
+
+            // Save to prefs
+            PreferenceManager.getDefaultSharedPreferences(this)
+                .edit {
+                    putString("sync_folder_uri", it.toString())
+                }
+
+            loadAllPhotos()
+        }
+    }
+
+    private val faceDetector = FaceDetection.getClient(
+        FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
             .build()
-        FaceDetection.getClient(options)
-    }
+    )
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val binder = service as CameraService.CameraBinder
             cameraService = binder.getService()
-            isBound = true
-            // 添加监听器时，CameraService 会自动发送当前状态
             cameraService?.addListener(cameraListener)
+            isBound = true
+            Log.d("MainActivity", "Service connected")
         }
+
         override fun onServiceDisconnected(name: ComponentName?) {
-            cameraService?.removeListener(cameraListener)
             cameraService = null
             isBound = false
-            isCameraConnected = false
-            updateStatus("相机未连接", false)
         }
     }
 
@@ -74,79 +96,45 @@ class MainActivity : AppCompatActivity() {
 
     private val cameraListener = object : CameraService.CameraEventListener {
         override fun onCameraStatusUpdate(status: CameraService.CameraStatus, extraMessage: String?) {
-            val displayMessage = if (extraMessage != null) "${status.label} ($extraMessage)" else status.label
-            isCameraConnected = status.isConnected
-            updateStatus(displayMessage, status.isConnected)
+            val statusText = if (status == CameraService.CameraStatus.CONNECTED) "Connected: $extraMessage" else "Disconnected"
+            isCameraConnected = status == CameraService.CameraStatus.CONNECTED
+            updateStatus(statusText, isCameraConnected)
         }
 
         override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
-            runOnUiThread {
-                val displayPath = realPath ?: uri.toString()
-                // 检查path是否已存在，避免重复
-                if (!allPhotos.contains(displayPath)) {
-                    allPhotos.add(0, displayPath)
-                    
-                    // ViewPager2 在位置 0 插入时的特殊处理
-                    // 必须使用 notifyDataSetChanged 以确保正确更新
-                    @Suppress("NotifyDataSetChanged")
-                    pagerAdapter.notifyDataSetChanged()
-                    
-                    // 优化: 立即显示加载状态,提升用户感知速度
-                    if (fromLiveEvent) {
-                        updateStatus("📸 New photo received! Loading...", isCameraConnected)
-                    }
-                }
-                // 仅当是实时拍照事件时，自动切换到详情视图并更新 detail
-                if (fromLiveEvent) {
+            val path = uri.toString()
+            Log.d("MainActivity", "New photo received: $path")
+            
+            // If it's a new photo (not from a full sync), add to the top
+            if (!allPhotos.contains(path)) {
+                allPhotos.add(0, path)
+                pagerAdapter.notifyItemInserted(0)
+                
+                // If it's the first photo or from sync, auto-focus it
+                if (allPhotos.size == 1 || fromLiveEvent) {
                     photoViewPager.setCurrentItem(0, true)
-                    updateDetailViews(displayPath)
                 }
+            } else {
+                // If it's already there, just navigate to it
+                val index = allPhotos.indexOf(path)
+                photoViewPager.setCurrentItem(index, true)
             }
         }
 
         override fun onSyncProgress(current: Int, total: Int) {
-            runOnUiThread {
-                val msg = if (total > 0) "Syncing photos: $current / $total" else "Syncing photos: $current"
-                updateStatus(msg, null)
-            }
+            updateStatus("Syncing: $current/$total", isCameraConnected)
         }
 
         override fun onSyncCompleted(total: Int) {
-            runOnUiThread {
-                val msg = if (total >= 0) "Sync completed: $total new photos" else "Sync completed"
-                updateStatus(msg, null)
-            }
+            updateStatus("Sync Complete: $total photos", isCameraConnected)
+            loadAllPhotos() // Refresh list
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        
         enableImmersiveMode()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-
-        val rootLayout = findViewById<View>(R.id.sidePanel).parent as View
-        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { _, insets ->
-            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val displayCutout = insets.displayCutout
-            
-            val top = systemBars.top + (displayCutout?.safeInsetTop ?: 0)
-            val bottom = systemBars.bottom + (displayCutout?.safeInsetBottom ?: 0)
-            
-            findViewById<View>(R.id.sidePanel).setPadding(0, top, 0, bottom)
-            
-            val statusBarView = findViewById<View>(R.id.statusBar)
-            val params = statusBarView.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-            params.bottomMargin = bottom + 16.dpToPx()
-            statusBarView.layoutParams = params
-            
-            insets
-        }
 
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
@@ -155,28 +143,32 @@ class MainActivity : AppCompatActivity() {
         focusCheckImageView = findViewById(R.id.focusCheckImageView)
         btnGallery = findViewById(R.id.btnGallery)
 
-        btnGallery.setOnClickListener {
-            finish()
-        }
-
         setupViewPager()
 
+        btnGallery.setOnClickListener {
+            startActivity(Intent(this, GalleryActivity::class.java))
+        }
+
+        checkFolderAndLoadPhotos()
+
+        // Bind to CameraService
         val serviceIntent = Intent(this, CameraService::class.java)
         bindService(serviceIntent, serviceConnection, BIND_AUTO_CREATE)
 
-        // 初始化时设置默认状态（红色表示未连接）
-        updateStatus("相机未连接", false)
-        
-        loadAllPhotos()
-        
-        val photoPath = intent.getStringExtra("photo_path")
-        if (photoPath != null) {
-            currentPhotoPath = photoPath
-            currentPhotoIndex = allPhotos.indexOf(photoPath)
-            if (currentPhotoIndex != -1) {
-                photoViewPager.setCurrentItem(currentPhotoIndex, false)
-                updateDetailViews(photoPath)
-            }
+        // Handle intent from Gallery
+        intent.getStringExtra("photo_path")?.let { path ->
+            loadAllPhotos(path)
+        }
+    }
+
+    private fun checkFolderAndLoadPhotos() {
+        val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this)
+            .getString("sync_folder_uri", null)
+
+        if (folderUriStr == null) {
+            requestFolderLauncher.launch(null)
+        } else {
+            loadAllPhotos()
         }
     }
 
@@ -185,55 +177,116 @@ class MainActivity : AppCompatActivity() {
         photoViewPager.adapter = pagerAdapter
         photoViewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
-                currentPhotoIndex = position
-                val path = allPhotos[position]
-                currentPhotoPath = path
-                updateDetailViews(path)
+                if (position < allPhotos.size) {
+                    currentPhotoIndex = position
+                    currentPhotoPath = allPhotos[position]
+                    updateDetailViews(allPhotos[position])
+                }
             }
         })
     }
 
-    private fun loadAllPhotos() {
-        mainScope.launch {
-            withContext(Dispatchers.IO) {
-                val photos = mutableListOf<String>()
-                val projection = arrayOf(MediaStore.Images.Media.DATA)
-                val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-                val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
-                val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
+    private fun loadAllPhotos(targetPhotoPath: String? = null) {
+        // Immediate feedback: if we have a target, show it right away
+        if (targetPhotoPath != null) {
+            if (!allPhotos.contains(targetPhotoPath)) {
+                allPhotos.add(0, targetPhotoPath)
+                pagerAdapter.notifyDataSetChanged()
+            }
+            val index = allPhotos.indexOf(targetPhotoPath)
+            photoViewPager.setCurrentItem(index, false)
+            // Force update if it's already at the target index
+            if (index == currentPhotoIndex) {
+                updateDetailViews(targetPhotoPath)
+            }
+        }
 
-                contentResolver.query(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    projection,
-                    selection,
-                    selectionArgs,
-                    sortOrder
-                )?.use { cursor ->
-                    val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-                    while (cursor.moveToNext()) {
-                        photos.add(cursor.getString(index))
+        mainScope.launch {
+            val photos = withContext(Dispatchers.IO) {
+                val result = mutableListOf<Pair<String, Long>>()
+                val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@MainActivity)
+                    .getString("sync_folder_uri", null) ?: return@withContext emptyList<String>()
+                
+                try {
+                    val rootUri = folderUriStr.toUri()
+                    val treeId = DocumentsContract.getTreeDocumentId(rootUri)
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, treeId)
+                    
+                    val projection = arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                    )
+                    
+                    contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                        val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val modIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        
+                        while (cursor.moveToNext()) {
+                            val mime = cursor.getString(mimeIdx)
+                            if (mime == "image/jpeg") {
+                                val docId = cursor.getString(idIdx)
+                                val lastMod = cursor.getLong(modIdx)
+                                val uri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
+                                result.add(uri.toString() to lastMod)
+                            }
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Fast sync error", e)
                 }
                 
-                // Update UI on main thread
-                withContext(Dispatchers.Main) {
-                    allPhotos.clear()
-                    allPhotos.addAll(photos)
-                    pagerAdapter.notifyDataSetChanged()
+                result.sortByDescending { it.second }
+                result.map { it.first }
+            }
+
+            if (photos.isNotEmpty() && photos != allPhotos) {
+                allPhotos.clear()
+                allPhotos.addAll(photos)
+                pagerAdapter.notifyDataSetChanged()
+                
+                // Restore selection
+                val selection = targetPhotoPath ?: currentPhotoPath
+                if (selection != null) {
+                    val index = allPhotos.indexOf(selection)
+                    if (index != -1) {
+                        photoViewPager.setCurrentItem(index, false)
+                    }
                 }
             }
         }
     }
 
     private fun updateDetailViews(path: String) {
-        val isContent = path.startsWith("content://") || path.startsWith("file://")
-        val file = if (!isContent) File(path) else null
-        if (!isContent && (file == null || !file.exists())) return
-
-        val fileName = if (file != null) file.name else path.toUri().lastPathSegment ?: "Unknown"
-        
         mainScope.launch {
-            // 1. 获取 EXIF
+            val isContent = path.startsWith("content://")
+            
+            // 1. 获取文件名 (仅显示文件名，不显示完整路径或 Document ID)
+            val fileName = withContext(Dispatchers.IO) {
+                if (isContent) {
+                    val uri = path.toUri()
+                    var name: String? = null
+                    try {
+                        contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { cursor ->
+                            if (cursor.moveToFirst()) {
+                                val nameIdx = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                                if (nameIdx != -1) {
+                                    name = cursor.getString(nameIdx)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w("MainActivity", "Failed to query display name", e)
+                    }
+                    // 备选方案：从 URI 片段中提取并清理
+                    name ?: uri.lastPathSegment?.substringAfterLast(':') ?: "Unknown"
+                } else {
+                    File(path).name
+                }
+            }
+
+            // 2. 获取 EXIF
             updateStatus("Loading: $fileName", isCameraConnected)
             val exifData = withContext(Dispatchers.IO) {
                 try {
@@ -316,7 +369,7 @@ class MainActivity : AppCompatActivity() {
                         }
                         
                         val result = targetLandmark?.position?.let {
-                            val scaledPoint = android.graphics.Point(it.x.toInt() * 8, it.y.toInt() * 8)
+                            val scaledPoint = Point(it.x.toInt() * 8, it.y.toInt() * 8)
                             Log.i("MainActivity", "✅ Using eye position for crop: $scaledPoint (original: ${it.x}, ${it.y})")
                             scaledPoint
                         }
@@ -353,7 +406,7 @@ class MainActivity : AppCompatActivity() {
                             val y = parts[1].toIntOrNull()
                             if (x != null && y != null) {
                                 Log.d("MainActivity", "Using AF point from EXIF: ($x, $y)")
-                                return@withContext android.graphics.Point(x, y)
+                                return@withContext Point(x, y)
                             }
                         }
                     }
@@ -371,45 +424,41 @@ class MainActivity : AppCompatActivity() {
             
             val croppedBitmap = withContext(Dispatchers.IO) {
                 try {
-                    // 加载原图
-                    val originalBitmap = if (isContent) {
-                        val uri = path.toUri()
-                        contentResolver.openInputStream(uri)?.use { stream ->
-                            BitmapFactory.decodeStream(stream)
-                        }
+                    val uri = if (path.startsWith("content://") || path.startsWith("file://")) {
+                        path.toUri()
                     } else {
-                        BitmapFactory.decodeFile(path)
+                        Uri.fromFile(File(path))
                     }
                     
-                    if (originalBitmap == null) {
-                        Log.e("MainActivity", "Failed to load original bitmap")
-                        return@withContext null
-                    }
+                    val decoder = contentResolver.openInputStream(uri)?.use { 
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            BitmapRegionDecoder.newInstance(it)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            BitmapRegionDecoder.newInstance(it, false)
+                        }
+                    } ?: return@withContext null
                     
-                    Log.d("MainActivity", "Original bitmap loaded: ${originalBitmap.width}x${originalBitmap.height}")
+                    val fullWidth = decoder.width
+                    val fullHeight = decoder.height
                     
                     // 计算裁剪区域
-                    val cropSize = 300.dpToPx() // 使用focusCheckCard的高度
-                    val centerX = cropCenter?.x ?: (originalBitmap.width / 2)
-                    val centerY = cropCenter?.y ?: (originalBitmap.height / 2)
+                    val cropSize = 300.dpToPx()
+                    val centerX = cropCenter?.x ?: (fullWidth / 2)
+                    val centerY = cropCenter?.y ?: (fullHeight / 2)
                     
                     var left = centerX - cropSize / 2
                     var top = centerY - cropSize / 2
                     
                     // 边界检查
-                    left = left.coerceIn(0, (originalBitmap.width - cropSize).coerceAtLeast(0))
-                    top = top.coerceIn(0, (originalBitmap.height - cropSize).coerceAtLeast(0))
+                    left = left.coerceIn(0, (fullWidth - cropSize).coerceAtLeast(0))
+                    top = top.coerceIn(0, (fullHeight - cropSize).coerceAtLeast(0))
                     
-                    val width = cropSize.coerceAtMost(originalBitmap.width - left)
-                    val height = cropSize.coerceAtMost(originalBitmap.height - top)
+                    val rect = Rect(left, top, left + cropSize, top + cropSize)
+                    val cropped = decoder.decodeRegion(rect, null)
+                    decoder.recycle()
                     
-                    Log.d("CenterCrop", "Cropping from ($left, $top) size ${width}x${height}, center: ($centerX, $centerY)")
-                    
-                    // 执行裁剪
-                    val cropped = Bitmap.createBitmap(originalBitmap, left, top, width, height)
-                    originalBitmap.recycle() // 释放原图内存
-                    
-                    Log.d("MainActivity", "✅ Cropped bitmap: ${cropped.width}x${cropped.height}")
+                    Log.d("MainActivity", "✅ Cropped bitmap: ${cropped?.width}x${cropped?.height}")
                     cropped
                 } catch (e: Exception) {
                     Log.e("MainActivity", "❌ Crop error", e)
@@ -429,44 +478,34 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Cancel all coroutines first to prevent race conditions
-        mainScope.cancel()
-        // Then close resources
-        faceDetector.close()
         if (isBound) {
             cameraService?.removeListener(cameraListener)
             unbindService(serviceConnection)
+            isBound = false
         }
+        mainScope.cancel()
     }
 
-    private fun updateStatus(text: String, isConnected: Boolean? = null) {
+    private fun updateStatus(status: String, isConnected: Boolean?) {
         runOnUiThread {
-            statusBarStatus.text = text
+            statusBarStatus.text = status
             isConnected?.let {
-                @Suppress("DEPRECATION")
-                connectionIndicator.setBackgroundColor(
-                    if (it) android.graphics.Color.GREEN else android.graphics.Color.RED
+                connectionIndicator.setBackgroundResource(
+                    if (it) R.drawable.indicator_connected else R.drawable.indicator_disconnected
                 )
             }
         }
     }
 
     private fun enableImmersiveMode() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-            val controller = window.insetsController
-            if (controller != null) {
-                controller.hide(android.view.WindowInsets.Type.statusBars() or android.view.WindowInsets.Type.navigationBars())
-                controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION)
+        // Use WindowCompat and WindowInsetsControllerCompat for a consistent API across versions
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
     }
 
@@ -479,20 +518,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun formatShutter(shutter: String): String {
         return try {
-            if (shutter.contains("/")) {
-                // 已经是分数格式，如 "1/250"
-                shutter
+            val s = shutter.toDouble()
+            if (s >= 1) {
+                s.toInt().toString()
             } else {
-                // 小数格式，如 "0.004"，转换为分数 "1/250"
-                val decimalValue = shutter.toDouble()
-                if (decimalValue >= 1.0) {
-                    // 大于等于1秒，直接显示
-                    "${decimalValue.toInt()}"
-                } else {
-                    // 小于1秒，转换为分数
-                    val denominator = (1.0 / decimalValue).toInt()
-                    "1/$denominator"
-                }
+                "1/${(1 / s).toInt()}"
             }
         } catch (_: Exception) {
             shutter
@@ -500,44 +530,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatFocalLength(focalLength: String?): String {
+        if (focalLength == null) return "--"
         return try {
-            if (focalLength.isNullOrEmpty() || focalLength == "0") {
-                "--"
-            } else if (focalLength.contains("/")) {
-                // 分数格式，如 "550/10"，计算为 "55"
+            if (focalLength.contains("/")) {
                 val parts = focalLength.split("/")
-                if (parts.size == 2) {
-                    val numerator = parts[0].toDouble()
-                    val denominator = parts[1].toDouble()
-                    if (denominator != 0.0) {
-                        val result = numerator / denominator
-                        // 如果是整数，不显示小数点
-                        if (result == result.toInt().toDouble()) {
-                            "${result.toInt()}"
-                        } else {
-                            String.format("%.1f", result)
-                        }
-                    } else {
-                        "--"
-                    }
-                } else {
-                    focalLength
-                }
+                val num = parts[0].toDouble()
+                val den = parts[1].toDouble()
+                (num / den).toInt().toString()
             } else {
-                // 已经是数字格式
-                val value = focalLength.toDouble()
-                if (value == value.toInt().toDouble()) {
-                    "${value.toInt()}"
-                } else {
-                    String.format("%.1f", value)
-                }
+                focalLength.toDouble().toInt().toString()
             }
         } catch (_: Exception) {
-            "--"
+            focalLength
         }
     }
 
     private fun Int.dpToPx(): Int {
-        return (this * resources.displayMetrics.density).toInt()
+        val density = resources.displayMetrics.density
+        return (this * density).toInt()
     }
 }

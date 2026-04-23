@@ -10,7 +10,6 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import android.provider.MediaStore
 import android.os.Build
 import android.content.ComponentName
 import android.content.ServiceConnection
@@ -18,11 +17,16 @@ import android.hardware.usb.UsbManager
 import android.os.IBinder
 import android.os.Parcelable
 import android.view.WindowManager
+import androidx.activity.result.contract.ActivityResultContracts
+import android.provider.DocumentsContract
+import androidx.preference.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.content.edit
+import androidx.core.net.toUri
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -37,6 +41,25 @@ class GalleryActivity : AppCompatActivity() {
 
     private var pendingScrollState: Parcelable? = null
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
+
+    private val requestFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        uri?.let {
+            contentResolver.takePersistableUriPermission(
+                it,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            PreferenceManager.getDefaultSharedPreferences(this)
+                .edit {
+                    putString("sync_folder_uri", it.toString())
+                }
+            
+            loadPhotos()
+        } ?: run {
+            updateStatus("未选择文件夹，无法显示照片", false)
+        }
+    }
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -128,8 +151,7 @@ class GalleryActivity : AppCompatActivity() {
         }
         recyclerView.adapter = adapter
 
-        // Load photos in background thread to avoid UI blocking
-        loadPhotos()
+        checkFolderAndLoadPhotos()
 
         // 在布局完成后恢复滚动状态（处理 Activity 重建）
         if (pendingScrollState != null) {
@@ -198,38 +220,73 @@ class GalleryActivity : AppCompatActivity() {
         }
     }
 
+    private fun checkFolderAndLoadPhotos() {
+        val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this)
+            .getString("sync_folder_uri", null)
+        
+        if (folderUriStr != null) {
+            val folderUri = folderUriStr.toUri()
+            val isPermissionGranted = contentResolver.persistedUriPermissions.any {
+                it.uri == folderUri && it.isReadPermission
+            }
+            if (isPermissionGranted) {
+                loadPhotos()
+            } else {
+                requestFolderLauncher.launch(null)
+            }
+        } else {
+            requestFolderLauncher.launch(null)
+        }
+    }
+
     private fun loadPhotos() {
         mainScope.launch {
-            withContext(Dispatchers.IO) {
-                val projection = arrayOf(MediaStore.Images.Media.DATA)
-                val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-                val selectionArgs = arrayOf("%Pictures/DSLR_Sidekick%")
-                // 按拍摄时间倒序排列（最新的在前）
-                val sortOrder = "${MediaStore.Images.Media.DATE_TAKEN} DESC"
-
-                contentResolver.query(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    projection,
-                    selection,
-                    selectionArgs,
-                    sortOrder
-                )?.use { cursor ->
-                    val index = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-                    val photos = mutableListOf<String>()
-                    while (cursor.moveToNext()) {
-                        photos.add(cursor.getString(index))
-                    }
-                    // Update UI on main thread
-                    withContext(Dispatchers.Main) {
-                        photoList.clear()
-                        photoList.addAll(photos)
-                        adapter.notifyDataSetChanged()
+            val photos = withContext(Dispatchers.IO) {
+                val result = mutableListOf<Pair<String, Long>>()
+                val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@GalleryActivity)
+                    .getString("sync_folder_uri", null) ?: return@withContext emptyList<String>()
+                
+                try {
+                    val rootUri = folderUriStr.toUri()
+                    val treeId = DocumentsContract.getTreeDocumentId(rootUri)
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, treeId)
+                    
+                    val projection = arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                    )
+                    
+                    contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                        val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val modIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
                         
-                        // Scroll to top to show newest photos
-                        recyclerView.scrollToPosition(0)
+                        while (cursor.moveToNext()) {
+                            val mime = cursor.getString(mimeIdx)
+                            if (mime == "image/jpeg") {
+                                val docId = cursor.getString(idIdx)
+                                val lastMod = cursor.getLong(modIdx)
+                                val uri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
+                                result.add(uri.toString() to lastMod)
+                            }
+                        }
                     }
-                } ?: run {
-                    Log.w("GalleryActivity", "Failed to query photos")
+                } catch (e: Exception) {
+                    Log.e("GalleryActivity", "Fast sync error", e)
+                }
+                
+                result.sortByDescending { it.second }
+                result.map { it.first }
+            }
+
+            if (photos.isNotEmpty()) {
+                photoList.clear()
+                photoList.addAll(photos)
+                adapter.notifyDataSetChanged()
+                // Only scroll to top if we weren't already somewhere else
+                if (recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
+                    // Consider if you really want to scroll to top every time
                 }
             }
         }

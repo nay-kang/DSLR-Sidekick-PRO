@@ -7,6 +7,7 @@ import android.widget.ImageView
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 
 class PhotoAdapter(
     private val photos: MutableList<String>,
@@ -25,10 +26,18 @@ class PhotoAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val path = photos[position]
-        Glide.with(holder.imageView.context)
+        val context = holder.imageView.context
+        
+        val thumbnailRequest = Glide.with(context)
             .load(path)
+            .sizeMultiplier(0.1f)
+
+        Glide.with(context)
+            .load(path)
+            .thumbnail(thumbnailRequest)
+            .transition(DrawableTransitionOptions.withCrossFade())
             .centerCrop()
-            .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // Optimize for large DSLR images
+            .diskCacheStrategy(DiskCacheStrategy.ALL)
             .into(holder.imageView)
         
         holder.itemView.setOnClickListener { onClick(path) }

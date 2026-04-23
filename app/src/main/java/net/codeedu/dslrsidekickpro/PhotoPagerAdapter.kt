@@ -5,6 +5,7 @@ import android.view.ViewGroup
 import androidx.recyclerview.widget.RecyclerView
 import com.bumptech.glide.Glide
 import com.bumptech.glide.load.engine.DiskCacheStrategy
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.github.chrisbanes.photoview.PhotoView
 
 class PhotoPagerAdapter(
@@ -21,11 +22,18 @@ class PhotoPagerAdapter(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
         val path = photos[position]
+        val context = holder.photoView.context
         
-        // 使用 Glide 异步加载图片，解决主线程解码导致的卡顿
-        Glide.with(holder.photoView.context)
+        val thumbnailRequest = Glide.with(context)
             .load(path)
-            .diskCacheStrategy(DiskCacheStrategy.RESOURCE) // Optimize for large DSLR images
+            .sizeMultiplier(0.1f)
+
+        // 使用 Glide 异步加载图片，解决主线程解码导致的卡顿
+        Glide.with(context)
+            .load(path)
+            .thumbnail(thumbnailRequest)
+            .transition(DrawableTransitionOptions.withCrossFade())
+            .diskCacheStrategy(DiskCacheStrategy.ALL)
             .into(holder.photoView)
     }
 

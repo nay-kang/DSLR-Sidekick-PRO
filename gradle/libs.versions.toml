@@ -12,6 +12,8 @@ glide = "5.0.5"
 glideKsp = "5.0.7"
 photoView = "2.3.0"
 kotlinxCoroutines = "1.10.2"
+documentfile = "1.1.0"
+preference = "1.2.1"
 ksp = "2.1.10-1.0.30"
 
 [libraries]
@@ -27,6 +29,8 @@ glide = { group = "com.github.bumptech.glide", name = "glide", version.ref = "gl
 glide-ksp = { group = "com.github.bumptech.glide", name = "ksp", version.ref = "glideKsp" }
 photoview = { group = "com.github.chrisbanes", name = "PhotoView", version.ref = "photoView" }
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutines" }
+androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
+androidx-preference-ktx = { group = "androidx.preference", name = "preference-ktx", version.ref = "preference" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
