@@ -58,35 +58,6 @@ class CameraService : Service() {
         fun onSyncCompleted(total: Int)
     }
 
-    private fun countJpgFilesRecursive(path: String, existingFiles: MutableSet<String>, countedPaths: MutableSet<String>): Int {
-        if (!isCameraConnected) return 0
-        var total = 0
-        try {
-            val folders = listFoldersInFolder(path)
-            folders?.forEach { sub ->
-                if (!sub.startsWith(".") && sub != "MISC") {
-                    val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
-                    total += countJpgFilesRecursive(subPath, existingFiles, countedPaths)
-                }
-            }
-            val files = listFilesInFolder(path)
-            // 优化: RAW+JPG模式下,只计数JPG文件
-            files?.filter { it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg") }?.forEach { fileName ->
-                val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
-                if (countedPaths.contains(fullPathKey)) return@forEach
-                if (existingFiles.contains(fileName)) {
-                    countedPaths.add(fullPathKey)
-                    return@forEach
-                }
-                countedPaths.add(fullPathKey)
-                total++
-            }
-        } catch (e: Exception) {
-            Log.e("CameraService", "Error counting folder: $path", e)
-        }
-        return total
-    }
-
     inner class CameraBinder : Binder() {
         fun getService(): CameraService = this@CameraService
     }
@@ -302,51 +273,38 @@ class CameraService : Service() {
         val syncExecutor = Executors.newSingleThreadExecutor()
         syncExecutor.execute {
             val downloadedCountRef = intArrayOf(0)
+            val syncStartTime = System.currentTimeMillis()
             try {
                 updateStatus(CameraStatus.SYNCING)
                 // 优化: 缩短相机初始化等待时间到500ms
                 Thread.sleep(500)
 
                 val (existingFiles, maxLocalSequence) = getExistingPublicPhotos()
+                Log.i("CameraService", "getExistingPublicPhotos took ${System.currentTimeMillis() - syncStartTime}ms")
 
                 // Tracks full camera paths already downloaded during this sync run to prevent duplicates
                 val downloadedPaths = mutableSetOf<String>()
 
-                // Pre-count total candidate JPGs to provide progress feedback
-                val countedPathsForCount = mutableSetOf<String>()
-                var totalCandidates = 0
-                try {
-                    totalCandidates += countJpgFilesRecursive("/DCIM", existingFiles, countedPathsForCount)
-                    val rootFolders = listFoldersInFolder("/") ?: emptyArray()
-                    rootFolders.forEach { store ->
-                        if (store.equals("DCIM", ignoreCase = true)) return@forEach
-                        val path = if (store.startsWith("/")) store else "/$store"
-                        totalCandidates += countJpgFilesRecursive(path, existingFiles, countedPathsForCount)
-                        totalCandidates += countJpgFilesRecursive("$path/DCIM", existingFiles, countedPathsForCount)
-                    }
-                } catch (e: Exception) {
-                    Log.e("CameraService", "Error counting files for progress", e)
-                }
+                // Notify listeners sync started with indeterminate total to skip slow pre-counting
+                val totalCandidates = -1
+                listeners.forEach { it.onSyncProgress(0, totalCandidates) }
 
-                // notify listeners sync started
-                listeners.forEach { it.onSyncProgress(0, if (totalCandidates > 0) totalCandidates else -1) }
-
-                // 1. Try common DCIM path
+                // 1. Try common DCIM path (some virtual filesystems expose this at root)
                 scanFolderRecursive("/DCIM", existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
 
                 // 2. Scan root for storage volumes
-                val rootFolders = listFoldersInFolder("/") ?: emptyArray()
+                val rootFolders = listFoldersInFolder("/")?.sortedDescending() ?: emptyList<String>()
                 rootFolders.forEach { store ->
                     if (store.equals("DCIM", ignoreCase = true)) return@forEach
                     val path = if (store.startsWith("/")) store else "/$store"
+                    // Recursive scan starting from store root will naturally find DCIM and other folders
                     scanFolderRecursive(path, existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
-                    scanFolderRecursive("$path/DCIM", existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
                 }
             } catch (e: Exception) {
                 Log.e("CameraService", "Sync error", e)
             } finally {
                 // Ensure we report the final count and shutdown executor even if an exception occurred
-                Log.i("CameraService", "Photo sync completed")
+                Log.i("CameraService", "Photo sync completed in ${System.currentTimeMillis() - syncStartTime}ms")
                 try {
                     listeners.forEach { it.onSyncCompleted(downloadedCountRef[0]) }
                     if (isCameraConnected) {
@@ -368,69 +326,109 @@ class CameraService : Service() {
         downloadedCountRef: IntArray, // Use IntArray as mutable reference in single-thread context
         totalCount: Int,
         maxLocalSequence: Int = 0 // Optimization: skip files with sequence <= this
-    ) {
-        if (!isCameraConnected) return
+    ): Boolean {
+        if (!isCameraConnected) return false
+        var reachedThreshold = false
 
         try {
-            val folders = listFoldersInFolder(path)
-            folders?.forEach { sub ->
-                if (!sub.startsWith(".") && sub != "MISC") {
-                    val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
-                    scanFolderRecursive(subPath, existingFiles, downloadedPaths, downloadedCountRef, totalCount, maxLocalSequence)
-                }
-            }
-
-            val files = listFilesInFolder(path)
-            // 优化: RAW+JPG模式下,只同步JPG文件用于快速预览
-            // Files are typically sorted by name, so we iterate in reverse (newest first)
-            files?.filter { 
-                it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg")
-            }?.reversed()?.forEach { fileName ->
-                // 添加连接检查，防止断开时继续操作
-                if (!isCameraConnected) return@forEach
-
-                val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
-
-                // Skip if this exact camera path was already downloaded in this run
-                if (downloadedPaths.contains(fullPathKey)) return@forEach
-
-                // Skip if a file with same display name already exists in gallery
-                if (existingFiles.contains(fileName)) {
-                    downloadedPaths.add(fullPathKey)
-                    return@forEach
-                }
-
-                // OPTIMIZATION: Check sequence number to skip old files
-                if (maxLocalSequence > 0) {
-                    val fileSequence = extractSequenceNumber(fileName)
-                    if (fileSequence > 0 && fileSequence <= maxLocalSequence) {
-                        // This file is older or equal to what we already have, skip it
-                        Log.d("CameraService", "Skipping old file (seq $fileSequence <= max $maxLocalSequence): $fileName")
-                        downloadedPaths.add(fullPathKey)
-                        return@forEach
+            // Optimization: Skip listing subfolders in known leaf-only directories (DCIM/100CANON etc)
+            // This avoids slow 10s+ folder listing on some Nikon/PTP cameras.
+            val isLikelyLeaf = path.contains("/DCIM/", ignoreCase = true) && 
+                              path.split('/').lastOrNull()?.matches(Regex("\\d{3}.*")) == true
+            
+            val folders = if (!isLikelyLeaf) {
+                val listFolderStart = System.currentTimeMillis()
+                val result = listFoldersInFolder(path)?.sortedDescending()
+                if (result != null) {
+                    Log.v("CameraService", "listFoldersInFolder($path) took ${System.currentTimeMillis() - listFolderStart}ms")
+                    for (sub in result) {
+                        if (sub.startsWith(".") || sub == "MISC") continue
+                        val subPath = if (path.endsWith("/")) "$path$sub" else "$path/$sub"
+                        if (scanFolderRecursive(subPath, existingFiles, downloadedPaths, downloadedCountRef, totalCount, maxLocalSequence)) {
+                            reachedThreshold = true
+                            break // Found old files in the newest subfolder, stop scanning older ones
+                        }
                     }
                 }
+                result
+            } else {
+                Log.d("CameraService", "Skipping subfolder check for likely leaf folder: $path")
+                null
+            }
 
-                // Per-file sync events are verbose; log at DEBUG level
-                Log.i("CameraService", "Syncing new file: $fileName")
-                val data = downloadFileWithTimeout(path, fileName)
-                if (data != null) {
-                    val uri = saveToSelectedFolder(fileName, data)
-                    if (uri != null) {
-                        // Add to existingFiles so further scans in this run won't re-download by name
-                        existingFiles.add(fileName)
+            if (reachedThreshold) return true
+
+            // Optimization: Skip listing files in known container-only directories to save PTP overhead
+            val isContainer = path == "/" || path.endsWith("/DCIM", ignoreCase = true) || 
+                             path.contains(Regex("/store_[0-9a-fA-F]+$"))
+            
+            if (isContainer && folders != null && folders.isNotEmpty()) {
+                Log.v("CameraService", "Skipping file list for container: $path")
+                return false
+            }
+
+            val listFilesStart = System.currentTimeMillis()
+            val files = listFilesInFolder(path)
+            if (files != null) {
+                Log.v("CameraService", "listFilesInFolder($path) found ${files.size} entries in ${System.currentTimeMillis() - listFilesStart}ms")
+            }
+            // Filter and sort descending to process newest files first
+            val jpgFiles = files?.filter {
+                it.lowercase().endsWith(".jpg") || it.lowercase().endsWith(".jpeg")
+            }?.sortedDescending()
+
+            if (jpgFiles != null) {
+                for (fileName in jpgFiles) {
+                    // 添加连接检查，防止断开时继续操作
+                    if (!isCameraConnected) break
+
+                    val fullPathKey = if (path.endsWith('/')) "$path$fileName" else "$path/$fileName"
+
+                    // Skip if this exact camera path was already downloaded in this run
+                    if (downloadedPaths.contains(fullPathKey)) continue
+
+                    // Skip if a file with same display name already exists in gallery
+                    if (existingFiles.contains(fileName)) {
                         downloadedPaths.add(fullPathKey)
+                        continue
+                    }
 
-                        val realPath = getRealPathFromURI(uri)
-                        // Notify listeners with the Uri and best-effort real path
-                        listeners.forEach { listener -> listener.onNewPhoto(uri, realPath, false) }
+                    // OPTIMIZATION: Check sequence number to skip old files
+                    if (maxLocalSequence > 0) {
+                        val fileSequence = extractSequenceNumber(fileName)
+                        if (fileSequence > 0 && fileSequence <= maxLocalSequence) {
+                            // Since we are sorted descending, everything else in this folder is also old
+                            Log.d("CameraService", "Reached files <= maxLocalSequence ($maxLocalSequence), stopping folder scan: $fileName")
+                            reachedThreshold = true
+                            break
+                        }
+                    }
 
-                        // update progress
-                        try {
-                            downloadedCountRef[0]++
-                            listeners.forEach { listener -> listener.onSyncProgress(downloadedCountRef[0], if (totalCount > 0) totalCount else -1) }
-                        } catch (e: Exception) {
-                            Log.e("CameraService", "Progress notify error", e)
+                    // Per-file sync events are verbose; log at DEBUG level
+                    Log.d("CameraService", "Syncing new file: $fileName")
+                    val downloadStart = System.currentTimeMillis()
+                    val data = downloadFileWithTimeout(path, fileName)
+                    if (data != null) {
+                        Log.v("CameraService", "downloadFileWithTimeout($fileName) took ${System.currentTimeMillis() - downloadStart}ms")
+                        val saveStart = System.currentTimeMillis()
+                        val uri = saveToSelectedFolder(fileName, data)
+                        if (uri != null) {
+                            Log.v("CameraService", "saveToSelectedFolder($fileName) took ${System.currentTimeMillis() - saveStart}ms")
+                            // Add to existingFiles so further scans in this run won't re-download by name
+                            existingFiles.add(fileName)
+                            downloadedPaths.add(fullPathKey)
+
+                            val realPath = getRealPathFromURI(uri)
+                            // Notify listeners with the Uri and best-effort real path
+                            listeners.forEach { listener -> listener.onNewPhoto(uri, realPath, false) }
+
+                            // update progress
+                            try {
+                                downloadedCountRef[0]++
+                                listeners.forEach { listener -> listener.onSyncProgress(downloadedCountRef[0], if (totalCount > 0) totalCount else -1) }
+                            } catch (e: Exception) {
+                                Log.e("CameraService", "Progress notify error", e)
+                            }
                         }
                     }
                 }
@@ -438,6 +436,7 @@ class CameraService : Service() {
         } catch (e: Exception) {
             Log.e("CameraService", "Error scanning folder: $path", e)
         }
+        return reachedThreshold
     }
 
     /**
