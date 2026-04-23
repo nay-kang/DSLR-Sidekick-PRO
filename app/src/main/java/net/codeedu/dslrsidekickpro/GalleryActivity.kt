@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.widget.TextView
+import android.widget.Button
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import androidx.appcompat.app.AlertDialog
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -35,6 +37,7 @@ class GalleryActivity : AppCompatActivity() {
     private val photoList = mutableListOf<String>()
     private lateinit var statusBarStatus: TextView
     private lateinit var connectionIndicator: View
+    private lateinit var clearPhotosButton: Button
 
     private var cameraService: CameraService? = null
     private var isBound = false
@@ -141,6 +144,7 @@ class GalleryActivity : AppCompatActivity() {
 
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
+        clearPhotosButton = findViewById(R.id.clearPhotosButton)
         recyclerView = findViewById(R.id.galleryRecyclerView)
         recyclerView.layoutManager = GridLayoutManager(this, 4)
 
@@ -150,6 +154,14 @@ class GalleryActivity : AppCompatActivity() {
             startActivity(intent)
         }
         recyclerView.adapter = adapter
+
+        // 设置清空按钮点击事件
+        clearPhotosButton.setOnClickListener {
+            showClearPhotosDialog()
+        }
+        
+        // 设置按钮颜色以适配主题 - 使用白色文字确保在深色背景上可见
+        clearPhotosButton.setTextColor(android.graphics.Color.WHITE)
 
         checkFolderAndLoadPhotos()
 
@@ -241,8 +253,9 @@ class GalleryActivity : AppCompatActivity() {
 
     private fun loadPhotos() {
         mainScope.launch {
+            // 第一步：快速加载照片列表（使用文件名排序）
             val photos = withContext(Dispatchers.IO) {
-                val result = mutableListOf<Pair<String, Long>>()
+                val result = mutableListOf<Triple<String, Int, String>>() // uri, sequenceNumber, displayName
                 val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@GalleryActivity)
                     .getString("sync_folder_uri", null) ?: return@withContext emptyList<String>()
                 
@@ -253,22 +266,23 @@ class GalleryActivity : AppCompatActivity() {
                     
                     val projection = arrayOf(
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME
                     )
                     
                     contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
                         val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                        val modIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
                         val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        val nameIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
                         
                         while (cursor.moveToNext()) {
                             val mime = cursor.getString(mimeIdx)
                             if (mime == "image/jpeg") {
                                 val docId = cursor.getString(idIdx)
-                                val lastMod = cursor.getLong(modIdx)
+                                val displayName = cursor.getString(nameIdx)
                                 val uri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
-                                result.add(uri.toString() to lastMod)
+                                val seqNum = extractSequenceNumber(displayName)
+                                result.add(Triple(uri.toString(), seqNum, displayName))
                             }
                         }
                     }
@@ -276,6 +290,7 @@ class GalleryActivity : AppCompatActivity() {
                     Log.e("GalleryActivity", "Fast sync error", e)
                 }
                 
+                // 先按序列号降序排列（快速）
                 result.sortByDescending { it.second }
                 result.map { it.first }
             }
@@ -284,10 +299,142 @@ class GalleryActivity : AppCompatActivity() {
                 photoList.clear()
                 photoList.addAll(photos)
                 adapter.notifyDataSetChanged()
-                // Only scroll to top if we weren't already somewhere else
-                if (recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE) {
-                    // Consider if you really want to scroll to top every time
+                
+                // 第二步：异步后台优化排序（使用EXIF日期）
+                launch {
+                    optimizeSortWithExifDates(photos)
                 }
+            }
+        }
+    }
+    
+    private suspend fun optimizeSortWithExifDates(initialPhotos: List<String>) {
+        withContext(Dispatchers.IO) {
+            try {
+                // 批量读取EXIF日期（并行处理）
+                val dateMap = mutableMapOf<String, Long>()
+                initialPhotos.chunked(10).forEach { batch ->
+                    batch.forEach { uriStr ->
+                        val uri = uriStr.toUri()
+                        val captureDate = getCaptureDateFromExif(uri)
+                        dateMap[uriStr] = captureDate
+                    }
+                }
+                
+                // 按EXIF日期重新排序
+                val sortedPhotos = initialPhotos.sortedByDescending { dateMap[it] ?: 0L }
+                
+                // 如果排序有变化，更新UI
+                if (sortedPhotos != initialPhotos) {
+                    withContext(Dispatchers.Main) {
+                        photoList.clear()
+                        photoList.addAll(sortedPhotos)
+                        adapter.notifyDataSetChanged()
+                        Log.d("GalleryActivity", "Optimized sort with EXIF dates")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("GalleryActivity", "Failed to optimize sort", e)
+            }
+        }
+    }
+    
+    private fun extractSequenceNumber(fileName: String): Int {
+        return try {
+            val regex = Regex("""(?:_DSC|DSC_|IMG_|P_|DSC)(\d+)""")
+            val matchResult = regex.find(fileName)
+            matchResult?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+    
+    private fun getCaptureDateFromExif(uri: Uri): Long {
+        return try {
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                val exif = androidx.exifinterface.media.ExifInterface(inputStream)
+                val dateStr = exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME)
+                
+                dateStr?.let {
+                    java.text.SimpleDateFormat("yyyy:MM:dd HH:mm:ss", java.util.Locale.US).parse(it)?.time
+                } ?: System.currentTimeMillis()
+            } ?: System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.e("GalleryActivity", "Failed to read EXIF date for $uri", e)
+            System.currentTimeMillis()
+        }
+    }
+    
+    private fun showClearPhotosDialog() {
+        AlertDialog.Builder(this)
+            .setTitle(R.string.clear_photos)
+            .setMessage(R.string.confirm_clear_photos)
+            .setPositiveButton(R.string.confirm) { _, _ ->
+                clearAllPhotos()
+            }
+            .setNegativeButton(R.string.cancel, null)
+            .show()
+    }
+
+    private fun clearAllPhotos() {
+        mainScope.launch {
+            val deletedCount = withContext(Dispatchers.IO) {
+                var count = 0
+                val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@GalleryActivity)
+                    .getString("sync_folder_uri", null) ?: return@withContext 0
+                
+                try {
+                    val rootUri = folderUriStr.toUri()
+                    val treeId = DocumentsContract.getTreeDocumentId(rootUri)
+                    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, treeId)
+                    
+                    val projection = arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE
+                    )
+                    
+                    contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+                        val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        
+                        val photosToDelete = mutableListOf<String>()
+                        while (cursor.moveToNext()) {
+                            val mime = cursor.getString(mimeIdx)
+                            if (mime == "image/jpeg") {
+                                val docId = cursor.getString(idIdx)
+                                photosToDelete.add(docId)
+                            }
+                        }
+                        
+                        // 删除所有照片文件
+                        for (docId in photosToDelete) {
+                            try {
+                                val documentUri = DocumentsContract.buildDocumentUriUsingTree(rootUri, docId)
+                                if (DocumentsContract.deleteDocument(contentResolver, documentUri)) {
+                                    count++
+                                }
+                            } catch (e: Exception) {
+                                Log.e("GalleryActivity", "Failed to delete photo: $docId", e)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("GalleryActivity", "Clear photos error", e)
+                }
+                
+                count
+            }
+            
+            // 更新UI
+            runOnUiThread {
+                photoList.clear()
+                adapter.notifyDataSetChanged()
+                Snackbar.make(
+                    findViewById(android.R.id.content),
+                    getString(R.string.photos_cleared) + " ($deletedCount)",
+                    Snackbar.LENGTH_LONG
+                ).show()
             }
         }
     }

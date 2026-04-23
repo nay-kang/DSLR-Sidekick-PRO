@@ -108,28 +108,28 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 val path = uri.toString()
                 Log.d("MainActivity", "New photo received: $path (live: $fromLiveEvent)")
-                
+
                 val isNew = !allPhotos.contains(path)
                 if (isNew) {
-                    allPhotos.add(0, path)
+                    allPhotos.add(0, path) // 新照片添加到开头（索引0）
                     pagerAdapter.notifyItemInserted(0)
+                    // RTL布局下，notifyItemInserted(0)后需要调整位置
+                    photoViewPager.post {
+                        photoViewPager.setCurrentItem(0, false)
+                    }
                 }
-                
+
                 // For live events (taking a picture) or the very first photo, always jump to it
                 if (fromLiveEvent || allPhotos.size == 1) {
                     val index = allPhotos.indexOf(path)
                     if (index != -1) {
-                        // Use a post to ensure notifyItemInserted has finished its layout
                         photoViewPager.post {
                             photoViewPager.setCurrentItem(index, true)
-                            // ViewPager2's onPageSelected might not trigger if index is 0, so force it
-                            if (index == 0) {
-                                updateDetailViews(path)
-                            }
+                            updateDetailViews(path)
                         }
                     }
                 } else if (photoViewPager.currentItem == 0) {
-                    // Even if it's not a live event, if we're at index 0 and a new photo is inserted at 0
+                    // If we're at the first item (newest), update to show the new photo
                     updateDetailViews(path)
                 }
             }
@@ -195,6 +195,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupViewPager() {
         pagerAdapter = PhotoPagerAdapter(allPhotos)
         photoViewPager.adapter = pagerAdapter
+
         photoViewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 if (position < allPhotos.size) {
@@ -257,7 +258,7 @@ class MainActivity : AppCompatActivity() {
                     Log.e("MainActivity", "Fast sync error", e)
                 }
                 
-                result.sortByDescending { it.second }
+                result.sortByDescending { it.second } // 降序排列：新的在前（索引0），旧的在后
                 result.map { it.first }
             }
 

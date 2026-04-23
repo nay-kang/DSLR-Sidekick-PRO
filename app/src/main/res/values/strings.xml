@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">DSLR Sidekick PRO</string>
+    <string name="clear_photos">清空</string>
+    <string name="confirm_clear_photos">确定要清空所有照片吗？此操作不可撤销。</string>
+    <string name="photos_cleared">已清空所有照片</string>
+    <string name="cancel">取消</string>
+    <string name="confirm">确定</string>
 </resources>
