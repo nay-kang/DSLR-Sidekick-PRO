@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DSLR Photo Gallery</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe.min.css" />
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #000;
+            min-height: 100vh;
+            padding: 4px;
+            margin: 0;
+            overflow-x: hidden;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 15px;
+            padding: 10px 0;
+        }
+        
+        .header h1 {
+            font-size: 1.5em;
+            margin-bottom: 5px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 0.85em;
+            opacity: 0.9;
+        }
+        
+        /* Mobile-first responsive grid - Square layout */
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 3px;
+            width: 100%;
+            max-width: 100vw;
+            margin: 0 auto;
+        }
+        
+        /* Tablet and larger screens */
+        @media (min-width: 768px) {
+            .gallery {
+                grid-template-columns: repeat(4, 1fr);
+                gap: 4px;
+            }
+        }
+        
+        /* Desktop screens */
+        @media (min-width: 1024px) {
+            .gallery {
+                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+                gap: 5px;
+            }
+        }
+        
+        /* Landscape orientation optimization */
+        @media (orientation: landscape) and (max-height: 500px) {
+            .gallery {
+                grid-template-columns: repeat(5, 1fr);
+                gap: 2px;
+            }
+            body {
+                padding: 2px;
+            }
+        }
+        
+        .photo-card {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            cursor: pointer;
+            position: relative;
+            aspect-ratio: 1;
+        }
+        
+        .photo-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center;
+            display: block;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .photo-card img.loaded {
+            opacity: 1;
+        }
+        
+        .photo-card:active {
+            transform: scale(0.98);
+        }
+        
+        @media (hover: hover) {
+            .photo-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            }
+        }
+        
+        /* PhotoSwipe optimization for mobile memory */
+        .pswp__bg {
+            background: #000 !important;
+        }
+        
+        .pswp__img {
+            object-fit: contain;
+        }
+        
+        /* Hide thumbnail placeholder to prevent flash */
+        .pswp__img--placeholder {
+            opacity: 0 !important;
+            visibility: hidden !important;
+        }
+        
+        @media (max-width: 768px) {
+            .pswp__img {
+                image-rendering: -webkit-optimize-contrast;
+                image-rendering: crisp-edges;
+            }
+        }
+        
+        /* Ensure full screen in landscape */
+        @media (orientation: landscape) {
+            .pswp {
+                width: 100vw !important;
+                height: 100vh !important;
+            }
+            
+            .pswp__scroll-wrap {
+                width: 100% !important;
+                height: 100% !important;
+            }
+        }
+        
+        .loading {
+            text-align: center;
+            color: #666;
+            padding: 40px 20px;
+            font-size: 0.9em;
+        }
+        
+        .no-photos {
+            text-align: center;
+            color: #666;
+            padding: 40px 20px;
+            font-size: 0.9em;
+        }
+        
+        .refresh-btn {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: white;
+            color: #667eea;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 50px;
+            font-size: 0.9em;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: 0.2s;
+            z-index: 100;
+        }
+        
+        .refresh-btn:active {
+            transform: scale(0.95);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="gallery" class="gallery">
+        <div class="loading">Loading...</div>
+    </div>
+    
+    <!-- Modal for viewing full-size images with PhotoSwipe -->
+    <div class="pswp" tabindex="-1" role="dialog" aria-hidden="true">
+        <div class="pswp__bg"></div>
+        <div class="pswp__scroll-wrap">
+            <div class="pswp__container">
+                <div class="pswp__item"></div>
+                <div class="pswp__item"></div>
+                <div class="pswp__item"></div>
+            </div>
+            
+            <div class="pswp__ui pswp__ui--hidden">
+                <div class="pswp__top-bar">
+                    <div class="pswp__counter"></div>
+                    <button class="pswp__button pswp__button--close" title="Close (Esc)"></button>
+                    <button class="pswp__button pswp__button--share" title="Share"></button>
+                    <button class="pswp__button pswp__button--fs" title="Toggle fullscreen"></button>
+                    <button class="pswp__button pswp__button--zoom" title="Zoom in/out"></button>
+                    <div class="pswp__preloader">
+                        <div class="pswp__preloader__icn">
+                            <div class="pswp__preloader__cut">
+                                <div class="pswp__preloader__donut"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="pswp__share-modal pswp__share-modal--hidden pswp__single-tap">
+                    <div class="pswp__share-tooltip"></div>
+                </div>
+                <button class="pswp__button pswp__button--arrow--left" title="Previous (arrow left)"></button>
+                <button class="pswp__button pswp__button--arrow--right" title="Next (arrow right)"></button>
+                <div class="pswp__caption">
+                    <div class="pswp__caption__center"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <button class="refresh-btn" onclick="loadPhotos()" style="display: none;">🔄 Refresh</button>
+    
+    <!-- PhotoSwipe.js -->
+    <script type="module">
+        import PhotoSwipeLightbox from 'https://cdn.jsdelivr.net/npm/photoswipe@5.4.4/dist/photoswipe-lightbox.esm.min.js';
+        window.PhotoSwipeLightbox = PhotoSwipeLightbox;
+    </script>
+    <script src="/js/gallery.js"></script>
+</body>
+</html>

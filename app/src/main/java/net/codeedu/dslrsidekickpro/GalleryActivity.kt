@@ -29,6 +29,7 @@ import kotlinx.coroutines.withContext
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.appcompat.app.AlertDialog
+import androidx.core.graphics.toColorInt
 
 class GalleryActivity : AppCompatActivity() {
 
@@ -38,9 +39,11 @@ class GalleryActivity : AppCompatActivity() {
     private lateinit var statusBarStatus: TextView
     private lateinit var connectionIndicator: View
     private lateinit var clearPhotosButton: Button
+    private lateinit var webServerToggleButton: Button
 
     private var cameraService: CameraService? = null
     private var isBound = false
+    private var isWebServerRunning = false
 
     private var pendingScrollState: Parcelable? = null
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
@@ -145,6 +148,7 @@ class GalleryActivity : AppCompatActivity() {
         statusBarStatus = findViewById(R.id.statusBarStatus)
         connectionIndicator = findViewById(R.id.connectionIndicator)
         clearPhotosButton = findViewById(R.id.clearPhotosButton)
+        webServerToggleButton = findViewById(R.id.webServerToggleButton)
         recyclerView = findViewById(R.id.galleryRecyclerView)
         recyclerView.layoutManager = GridLayoutManager(this, 4)
 
@@ -158,6 +162,11 @@ class GalleryActivity : AppCompatActivity() {
         // 设置清空按钮点击事件
         clearPhotosButton.setOnClickListener {
             showClearPhotosDialog()
+        }
+        
+        // 设置 Web 服务器开关按钮点击事件
+        webServerToggleButton.setOnClickListener {
+            toggleWebServer()
         }
         
         // 设置按钮颜色以适配主题 - 使用白色文字确保在深色背景上可见
@@ -435,6 +444,138 @@ class GalleryActivity : AppCompatActivity() {
                     getString(R.string.photos_cleared) + " ($deletedCount)",
                     Snackbar.LENGTH_LONG
                 ).show()
+            }
+        }
+    }
+
+    /**
+     * Toggle web server on/off
+     */
+    private fun toggleWebServer() {
+        if (isWebServerRunning) {
+            stopWebServer()
+        } else {
+            startWebServer()
+        }
+    }
+
+    /**
+     * Start the photo web server service
+     */
+    private fun startWebServer() {
+        try {
+            val intent = Intent(this, PhotoWebServerService::class.java).apply {
+                action = PhotoWebServerService.ACTION_START_SERVER
+                putExtra(PhotoWebServerService.EXTRA_PORT, 8080)
+            }
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            
+            isWebServerRunning = true
+            webServerToggleButton.text = "⏹ Stop Web"
+            webServerToggleButton.setBackgroundColor("#FF5252".toColorInt())
+            
+            // Show info snackbar with access instructions
+            val deviceIP = getDeviceIPAddress()
+            Snackbar.make(
+                findViewById(android.R.id.content),
+                "Web server started! Access from other devices:\nhttp://$deviceIP:8080",
+                Snackbar.LENGTH_LONG
+            ).show()
+            
+            Log.i("GalleryActivity", "Web server started on port 8080")
+        } catch (e: Exception) {
+            Log.e("GalleryActivity", "Failed to start web server", e)
+            Snackbar.make(
+                findViewById(android.R.id.content),
+                "Failed to start web server: ${e.message}",
+                Snackbar.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    /**
+     * Stop the photo web server service
+     */
+    private fun stopWebServer() {
+        try {
+            val intent = Intent(this, PhotoWebServerService::class.java).apply {
+                action = PhotoWebServerService.ACTION_STOP_SERVER
+            }
+            startService(intent)
+            
+            isWebServerRunning = false
+            webServerToggleButton.text = "🌐 Start Web"
+            webServerToggleButton.setBackgroundColor("#4CAF50".toColorInt())
+            
+            Snackbar.make(
+                findViewById(android.R.id.content),
+                "Web server stopped",
+                Snackbar.LENGTH_SHORT
+            ).show()
+            
+            Log.i("GalleryActivity", "Web server stopped")
+        } catch (e: Exception) {
+            Log.e("GalleryActivity", "Failed to stop web server", e)
+        }
+    }
+
+    /**
+     * Get device IP address for display
+     */
+    private fun getDeviceIPAddress(): String {
+        return try {
+            // Method 1: Try to enumerate network interfaces (works without permissions)
+            java.net.NetworkInterface.getNetworkInterfaces()?.asSequence()
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.filter { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                ?.firstOrNull { address ->
+                    // Prefer WiFi or Ethernet addresses
+                    val interfaceName = java.net.NetworkInterface.getByInetAddress(address)?.name ?: ""
+                    interfaceName.contains("wlan", ignoreCase = true) ||
+                    interfaceName.contains("eth", ignoreCase = true) ||
+                    interfaceName.contains("wifi", ignoreCase = true)
+                }?.hostAddress
+                ?: java.net.NetworkInterface.getNetworkInterfaces()?.asSequence()
+                    ?.flatMap { it.inetAddresses.asSequence() }
+                    ?.filter { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                    ?.firstOrNull()?.hostAddress
+                ?: "your-device-ip"
+        } catch (e: Exception) {
+            Log.e("GalleryActivity", "Error getting IP address via NetworkInterface", e)
+            
+            // Fallback: Use ConnectivityManager for modern Android
+            try {
+                val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                val activeNetwork = connectivityManager?.activeNetwork
+                val capabilities = connectivityManager?.getNetworkCapabilities(activeNetwork)
+                
+                if (capabilities != null) {
+                    // Check if connected via WiFi or Ethernet
+                    if (capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ||
+                        capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                        
+                        // Get link properties to find IP address
+                        val linkProperties = connectivityManager.getLinkProperties(activeNetwork)
+                        val ipAddresses = linkProperties?.linkAddresses
+                        
+                        ipAddresses?.firstOrNull { 
+                            it.address is java.net.Inet4Address && !it.address.isLoopbackAddress 
+                        }?.address?.hostAddress
+                            ?: "your-device-ip"
+                    } else {
+                        "your-device-ip"
+                    }
+                } else {
+                    "your-device-ip"
+                }
+            } catch (e2: Exception) {
+                Log.e("GalleryActivity", "Fallback IP detection also failed", e2)
+                "your-device-ip"
             }
         }
     }

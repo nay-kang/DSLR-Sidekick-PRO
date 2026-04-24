@@ -83,6 +83,7 @@ dependencies {
     
     implementation(libs.photoview)
     implementation(libs.kotlinx.coroutines.play.services)
+    implementation(libs.nanohttpd)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
