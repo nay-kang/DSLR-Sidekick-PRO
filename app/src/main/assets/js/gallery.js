@@ -4,6 +4,44 @@ let photos = [];
 let lightbox = null;
 let autoRefreshTimer = null;
 let currentETag = null; // Store ETag for conditional requests
+let eventSource = null; // SSE connection for real-time updates
+
+// Initialize Server-Sent Events for real-time photo updates
+function initSSE() {
+    if (eventSource) {
+        console.log('SSE already connected, skipping...');
+        return;
+    }
+    
+    console.log('Initializing SSE connection to /api/events...');
+    eventSource = new EventSource('/api/events');
+    
+    eventSource.onopen = function() {
+        console.log('✅ SSE connection established');
+    };
+    
+    eventSource.onmessage = function(event) {
+        try {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'new_photo') {
+                console.log('📸 New photo detected:', data.name);
+                // Immediately reload photos when notified
+                loadPhotos();
+            } else if (data.type === 'connected') {
+                console.log('🔗', data.message);
+            }
+        } catch (e) {
+            console.error('❌ Error parsing SSE message:', e);
+        }
+    };
+    
+    eventSource.onerror = function(error) {
+        console.error('❌ SSE error:', error);
+        console.log('SSE will automatically reconnect...');
+        // EventSource will automatically reconnect
+    };
+}
 
 // Load photos from API with ETag support
 async function loadPhotos() {
@@ -37,7 +75,19 @@ async function loadPhotos() {
             console.log('Photos updated:', photos.length, '->', newPhotos.length);
             photos = newPhotos;
             renderGallery();
-            initPhotoSwipe();
+            
+            // Initialize PhotoSwipe only if library is loaded
+            if (window.PhotoSwipeLightbox) {
+                initPhotoSwipe();
+            } else {
+                console.warn('⚠️ PhotoSwipe not available, will initialize later');
+                // Wait for PhotoSwipe to load
+                setTimeout(() => {
+                    if (window.PhotoSwipeLightbox) {
+                        initPhotoSwipe();
+                    }
+                }, 1000);
+            }
         }
     } catch (error) {
         console.error('Error loading photos:', error);
@@ -87,6 +137,12 @@ function renderGallery() {
 
 // Initialize PhotoSwipe with memory optimization
 function initPhotoSwipe() {
+    // Check if PhotoSwipe is available
+    if (!window.PhotoSwipeLightbox) {
+        console.warn('⚠️ PhotoSwipe not loaded yet, skipping initialization');
+        return;
+    }
+    
     if (lightbox) {
         lightbox.destroy();
     }
@@ -198,4 +254,18 @@ function startAutoRefresh() {
 
 // Initial load
 loadPhotos();
-startAutoRefresh();
+initSSE(); // Start SSE connection for real-time updates
+startAutoRefresh(); // Fallback polling in case SSE fails
+
+// Wait for PhotoSwipe to be available, then initialize
+function waitForPhotoSwipe() {
+    if (window.PhotoSwipeLightbox) {
+        console.log('✅ PhotoSwipe loaded, initializing...');
+        initPhotoSwipe();
+    } else {
+        console.log('⏳ Waiting for PhotoSwipe to load...');
+        setTimeout(waitForPhotoSwipe, 100);
+    }
+}
+
+waitForPhotoSwipe();

@@ -421,6 +421,16 @@ class CameraService : Service() {
                             val realPath = getRealPathFromURI(uri)
                             // Notify listeners with the Uri and best-effort real path
                             listeners.forEach { listener -> listener.onNewPhoto(uri, realPath, false) }
+                            
+                            // Notify web server about new photo for SSE real-time updates
+                            try {
+                                val webServerIntent = Intent(this, PhotoWebServerService::class.java)
+                                webServerIntent.action = PhotoWebServerService.ACTION_NOTIFY_NEW_PHOTO
+                                webServerIntent.putExtra(PhotoWebServerService.EXTRA_PHOTO_NAME, fileName)
+                                startService(webServerIntent)
+                            } catch (e: Exception) {
+                                Log.e("CameraService", "Failed to send SSE notification", e)
+                            }
 
                             // update progress
                             try {
@@ -471,16 +481,26 @@ class CameraService : Service() {
                         val folder = fullPath.substring(0, lastSlash)
                         val fileName = fullPath.substring(lastSlash + 1)
                         if (fileName.lowercase().endsWith(".jpg") || fileName.lowercase().endsWith(".jpeg")) {
-                            Log.i("CameraService", "New photo detected: $fileName")
+                            Log.i("CameraService", "New photo detected via event: $fileName")
+                            
                             // USB传输单线程最快,直接在当前线程下载
                             try {
-                                // 添加超时机制下载文件
                                 val imageData = downloadFileWithTimeout(folder, fileName)
                                 if (imageData != null) {
                                     val uri = saveToSelectedFolder(fileName, imageData)
-                                    uri?.let {
-                                        val realPath = getRealPathFromURI(it)
-                                        listeners.forEach { listener -> listener.onNewPhoto(it, realPath, true) }
+                                    if (uri != null) {
+                                        val realPath = getRealPathFromURI(uri)
+                                        listeners.forEach { listener -> listener.onNewPhoto(uri, realPath, true) }
+                                        
+                                        // Notify web server about new photo for SSE
+                                        try {
+                                            val webServerIntent = Intent(this@CameraService, PhotoWebServerService::class.java)
+                                            webServerIntent.action = PhotoWebServerService.ACTION_NOTIFY_NEW_PHOTO
+                                            webServerIntent.putExtra(PhotoWebServerService.EXTRA_PHOTO_NAME, fileName)
+                                            startService(webServerIntent)
+                                        } catch (e: Exception) {
+                                            Log.e("CameraService", "Failed to send SSE notification", e)
+                                        }
                                     }
                                 }
                             } catch (e: Exception) {

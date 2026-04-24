@@ -37,7 +37,9 @@ class PhotoWebServerService : Service() {
         // Broadcast actions for external control
         const val ACTION_START_SERVER = "net.codeedu.dslrsidekickpro.START_WEB_SERVER"
         const val ACTION_STOP_SERVER = "net.codeedu.dslrsidekickpro.STOP_WEB_SERVER"
+        const val ACTION_NOTIFY_NEW_PHOTO = "net.codeedu.dslrsidekickpro.NOTIFY_NEW_PHOTO"
         const val EXTRA_PORT = "port"
+        const val EXTRA_PHOTO_NAME = "photo_name"
     }
 
     override fun onCreate() {
@@ -55,6 +57,16 @@ class PhotoWebServerService : Service() {
             ACTION_STOP_SERVER -> {
                 stopWebServer()
                 stopSelf()
+            }
+            ACTION_NOTIFY_NEW_PHOTO -> {
+                // Notify web clients about new photo
+                val photoName = intent.getStringExtra(EXTRA_PHOTO_NAME)
+                if (photoName != null) {
+                    Log.i(TAG, "Received notification for new photo: $photoName")
+                    onNewPhotoSaved(photoName)
+                } else {
+                    Log.w(TAG, "Received NOTIFY_NEW_PHOTO but no photo name provided")
+                }
             }
             else -> {
                 // Default behavior: start server on default port
@@ -192,6 +204,22 @@ class PhotoWebServerService : Service() {
     }
 
     /**
+     * Notify web clients about a new photo (called from CameraService)
+     */
+    fun onNewPhotoSaved(fileName: String) {
+        Log.i(TAG, "onNewPhotoSaved called for: $fileName")
+        
+        // Must run on background thread to avoid NetworkOnMainThreadException
+        Thread {
+            try {
+                webServer?.notifyNewPhoto(fileName)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying SSE clients", e)
+            }
+        }.start()
+    }
+
+    /**
      * Get photo data as byte array by URI string
      */
     fun getPhotoData(uriString: String): ByteArray? {
@@ -216,6 +244,9 @@ class PhotoWebServerService : Service() {
      * Inner class implementing the NanoHTTPD server
      */
     private inner class PhotoWebServer(private val context: Context, port: Int) : NanoHTTPD(port) {
+        
+        // Track connected SSE clients for real-time notifications
+        private val sseClients = java.util.concurrent.CopyOnWriteArrayList<java.io.OutputStream>()
 
         override fun serve(session: IHTTPSession): Response {
             val uri = session.uri
@@ -224,6 +255,7 @@ class PhotoWebServerService : Service() {
             return try {
                 when {
                     uri == "/" || uri == "/index.html" -> serveGalleryPage()
+                    uri == "/api/events" && method == Method.GET -> serveEventStream()
                     uri.startsWith("/api/photos") && method == Method.GET -> servePhotoList(session)
                     uri.startsWith("/api/thumb/") && method == Method.GET -> serveThumbnail(uri)
                     uri.startsWith("/api/photo/") && method == Method.GET -> serveSinglePhoto(uri)
@@ -242,6 +274,95 @@ class PhotoWebServerService : Service() {
                     "text/plain",
                     "Internal Server Error: ${e.message}"
                 )
+            }
+        }
+
+        /**
+         * Serve Server-Sent Events stream for real-time photo updates
+         */
+        private fun serveEventStream(): Response {
+            Log.i(TAG, "SSE client connecting...")
+            
+            // Create a custom response that writes directly to the output stream
+            return object : Response(Status.OK, "text/event-stream", null, 0) {
+                private var clientOutputStream: java.io.OutputStream? = null
+                
+                override fun send(outputStream: java.io.OutputStream) {
+                    try {
+                        // Store the output stream for later use
+                        clientOutputStream = outputStream
+                        sseClients.add(outputStream)
+                        Log.i(TAG, "SSE client connected (direct). Total clients: ${sseClients.size}")
+                        
+                        // Send headers
+                        val headerText = "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: text/event-stream\r\n" +
+                                "Cache-Control: no-cache\r\n" +
+                                "Connection: keep-alive\r\n" +
+                                "Access-Control-Allow-Origin: *\r\n" +
+                                "\r\n"
+                        outputStream.write(headerText.toByteArray(Charsets.UTF_8))
+                        outputStream.flush()
+                        
+                        // Send initial connected event
+                        val connectedEvent = "data: {\"type\":\"connected\",\"message\":\"SSE connection established\"}\n\n"
+                        outputStream.write(connectedEvent.toByteArray(Charsets.UTF_8))
+                        outputStream.flush()
+                        Log.d(TAG, "Sent SSE connected event")
+                        
+                        // Keep connection alive with periodic keepalive
+                        while (!Thread.currentThread().isInterrupted) {
+                            Thread.sleep(25000) // 25 seconds
+                            val keepalive = ": keepalive\n\n"
+                            outputStream.write(keepalive.toByteArray(Charsets.UTF_8))
+                            outputStream.flush()
+                            Log.v(TAG, "Sent keepalive")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "SSE stream error: ${e.message}")
+                        clientOutputStream?.let { sseClients.remove(it) }
+                        Log.i(TAG, "SSE client removed. Remaining: ${sseClients.size}")
+                    }
+                }
+            }
+        }
+
+        /**
+         * Notify all SSE clients about new photos
+         */
+        fun notifyNewPhoto(photoName: String) {
+            if (sseClients.isEmpty()) {
+                Log.d(TAG, "No SSE clients to notify")
+                return
+            }
+            
+            val timestamp = System.currentTimeMillis()
+            val event = "event: message\ndata: {\"type\":\"new_photo\",\"name\":\"$photoName\",\"timestamp\":$timestamp}\n\n"
+            
+            Log.i(TAG, "Notifying ${sseClients.size} SSE clients about: $photoName")
+            
+            val clientsToRemove = mutableListOf<java.io.OutputStream>()
+            var successCount = 0
+            
+            for ((index, clientOutput) in sseClients.withIndex()) {
+                try {
+                    clientOutput.write(event.toByteArray(Charsets.UTF_8))
+                    clientOutput.flush()
+                    successCount++
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to notify SSE client #$index: ${e.message}")
+                    clientsToRemove.add(clientOutput)
+                }
+            }
+            
+            if (successCount > 0) {
+                Log.d(TAG, "Successfully notified $successCount/${sseClients.size} clients")
+            }
+            
+            // Remove failed clients
+            sseClients.removeAll(clientsToRemove)
+            if (clientsToRemove.isNotEmpty()) {
+                Log.i(TAG, "Removed ${clientsToRemove.size} disconnected clients. Remaining: ${sseClients.size}")
             }
         }
 
