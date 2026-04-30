@@ -34,7 +34,7 @@ import kotlinx.coroutines.tasks.await
 import android.graphics.Point
 import androidx.core.content.edit
 
-class MainActivity : AppCompatActivity() {
+open class ViewerActivity : AppCompatActivity() {
     private lateinit var statusBarStatus: TextView
     private lateinit var connectionIndicator: View
     private lateinit var exifInfoTextView: TextView
@@ -86,7 +86,7 @@ class MainActivity : AppCompatActivity() {
             cameraService = binder.getService()
             cameraService?.addListener(cameraListener)
             isBound = true
-            Log.d("MainActivity", "Service connected")
+            Log.d("ViewerActivity", "Service connected")
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -107,7 +107,7 @@ class MainActivity : AppCompatActivity() {
         override fun onNewPhoto(uri: Uri, realPath: String?, fromLiveEvent: Boolean) {
             runOnUiThread {
                 val path = uri.toString()
-                Log.d("MainActivity", "New photo received: $path (live: $fromLiveEvent)")
+                Log.d("ViewerActivity", "New photo received: $path (live: $fromLiveEvent)")
 
                 val isNew = !allPhotos.contains(path)
                 if (isNew) {
@@ -225,25 +225,25 @@ class MainActivity : AppCompatActivity() {
         mainScope.launch {
             val photos = withContext(Dispatchers.IO) {
                 val result = mutableListOf<Pair<String, Long>>()
-                val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@MainActivity)
+                val folderUriStr = PreferenceManager.getDefaultSharedPreferences(this@ViewerActivity)
                     .getString("sync_folder_uri", null) ?: return@withContext emptyList<String>()
-                
+
                 try {
                     val rootUri = folderUriStr.toUri()
                     val treeId = DocumentsContract.getTreeDocumentId(rootUri)
                     val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(rootUri, treeId)
-                    
+
                     val projection = arrayOf(
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                         DocumentsContract.Document.COLUMN_LAST_MODIFIED,
                         DocumentsContract.Document.COLUMN_MIME_TYPE
                     )
-                    
+
                     contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
                         val idIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                         val modIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
                         val mimeIdx = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                        
+
                         while (cursor.moveToNext()) {
                             val mime = cursor.getString(mimeIdx)
                             if (mime == "image/jpeg") {
@@ -255,9 +255,9 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("MainActivity", "Fast sync error", e)
+                    Log.e("ViewerActivity", "Fast sync error", e)
                 }
-                
+
                 result.sortByDescending { it.second } // 降序排列：新的在前（索引0），旧的在后
                 result.map { it.first }
             }
@@ -266,7 +266,7 @@ class MainActivity : AppCompatActivity() {
                 allPhotos.clear()
                 allPhotos.addAll(photos)
                 pagerAdapter.notifyDataSetChanged()
-                
+
                 // Restore selection
                 val selection = targetPhotoPath ?: currentPhotoPath
                 if (selection != null) {
@@ -286,7 +286,7 @@ class MainActivity : AppCompatActivity() {
         updateDetailJob?.cancel()
         updateDetailJob = mainScope.launch {
             val isContent = path.startsWith("content://")
-            
+
             // 1. 获取文件名 (仅显示文件名，不显示完整路径或 Document ID)
             val fileName = withContext(Dispatchers.IO) {
                 if (isContent) {
@@ -302,7 +302,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     } catch (e: Exception) {
-                        Log.w("MainActivity", "Failed to query display name", e)
+                        Log.w("ViewerActivity", "Failed to query display name", e)
                     }
                     // 备选方案：从 URI 片段中提取并清理
                     name ?: uri.lastPathSegment?.substringAfterLast(':') ?: "Unknown"
@@ -328,7 +328,7 @@ class MainActivity : AppCompatActivity() {
                     val focalLength = formatFocalLength(exif?.getAttribute(ExifInterface.TAG_FOCAL_LENGTH))
                     "f/$aperture   ${formatShutter(shutter)}s   ISO $iso   ${focalLength}mm"
                 } catch (e: Exception) {
-                    Log.e("MainActivity", "EXIF read error", e)
+                    Log.e("ViewerActivity", "EXIF read error", e)
                     "--   --   --   --"
                 }
             }
@@ -347,68 +347,68 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         BitmapFactory.decodeFile(path, options)
                     }
-                    
+
                     if (bitmap == null) {
-                        Log.w("MainActivity", "Failed to decode bitmap for eye detection")
+                        Log.w("ViewerActivity", "Failed to decode bitmap for eye detection")
                         return@withContext null
                     }
-                    
-                    Log.d("MainActivity", "Bitmap loaded: ${bitmap.width}x${bitmap.height}, starting face detection...")
-                    
+
+                    Log.d("ViewerActivity", "Bitmap loaded: ${bitmap.width}x${bitmap.height}, starting face detection...")
+
                     val image = InputImage.fromBitmap(bitmap, 0)
                     val faces = faceDetector.process(image).await()
-                    
-                    Log.d("MainActivity", "Face detection completed, found ${faces.size} face(s)")
-                    
+
+                    Log.d("ViewerActivity", "Face detection completed, found ${faces.size} face(s)")
+
                     val face = faces.firstOrNull()
                     if (face == null) {
-                        Log.d("MainActivity", "No face detected, will try EXIF or center")
+                        Log.d("ViewerActivity", "No face detected, will try EXIF or center")
                         // 继续执行后面的EXIF逻辑
                     } else {
-                        Log.d("MainActivity", "Face bounds: ${face.boundingBox}")
-                        
+                        Log.d("ViewerActivity", "Face bounds: ${face.boundingBox}")
+
                         // 获取左右眼
                         val leftEye = face.getLandmark(FaceLandmark.LEFT_EYE)
                         val rightEye = face.getLandmark(FaceLandmark.RIGHT_EYE)
-                        
-                        Log.d("MainActivity", "Left eye: ${leftEye?.position}, Right eye: ${rightEye?.position}")
-                        
+
+                        Log.d("ViewerActivity", "Left eye: ${leftEye?.position}, Right eye: ${rightEye?.position}")
+
                         // 智能选择：优先使用左眼
                         val targetLandmark = when {
                             leftEye != null && rightEye != null -> {
-                                Log.d("MainActivity", "Both eyes detected, using left eye by default")
+                                Log.d("ViewerActivity", "Both eyes detected, using left eye by default")
                                 leftEye
                             }
                             leftEye != null -> {
-                                Log.d("MainActivity", "Only left eye detected")
+                                Log.d("ViewerActivity", "Only left eye detected")
                                 leftEye
                             }
                             rightEye != null -> {
-                                Log.d("MainActivity", "Only right eye detected")
+                                Log.d("ViewerActivity", "Only right eye detected")
                                 rightEye
                             }
                             else -> {
-                                Log.w("MainActivity", "Face detected but no eyes found")
+                                Log.w("ViewerActivity", "Face detected but no eyes found")
                                 null
                             }
                         }
-                        
+
                         val result = targetLandmark?.position?.let {
                             val scaledPoint = Point(it.x.toInt() * 8, it.y.toInt() * 8)
-                            Log.i("MainActivity", "✅ Using eye position for crop: $scaledPoint (original: ${it.x}, ${it.y})")
+                                 Log.i("ViewerActivity", "✅ Using eye position for crop: $scaledPoint (original: ${it.x}, ${it.y})")
                             scaledPoint
                         }
-                        
+
                         if (result != null) {
                             return@withContext result
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("MainActivity", "Eye detection error", e)
+                    Log.e("ViewerActivity", "Eye detection error", e)
                 } finally {
                     bitmap?.recycle()
                 }
-                
+
                 // 优先级2: 尝试从EXIF获取对焦点位置
                 try {
                     val exif = if (isContent) {
@@ -417,12 +417,12 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         ExifInterface(path)
                     }
-                    
+
                     // 获取对焦点坐标（不同相机厂商可能使用不同标签）
-                    val afPointX = exif?.getAttribute("InteroperabilityIndex") 
+                    val afPointX = exif?.getAttribute("InteroperabilityIndex")
                         ?: exif?.getAttribute("SubjectLocation")
                         ?: exif?.getAttribute("SubjectArea")
-                    
+
                     if (!afPointX.isNullOrEmpty()) {
                         // 解析对焦点坐标，格式可能是 "x,y" 或 "x,y,width,height"
                         val parts = afPointX.split(",", " ").filter { it.isNotEmpty() }
@@ -430,23 +430,23 @@ class MainActivity : AppCompatActivity() {
                             val x = parts[0].toIntOrNull()
                             val y = parts[1].toIntOrNull()
                             if (x != null && y != null) {
-                                Log.d("MainActivity", "Using AF point from EXIF: ($x, $y)")
+                                Log.d("ViewerActivity", "Using AF point from EXIF: ($x, $y)")
                                 return@withContext Point(x, y)
                             }
                         }
                     }
                 } catch (_: Exception) {
-                    Log.d("MainActivity", "No AF point in EXIF, will use center")
+                    Log.d("ViewerActivity", "No AF point in EXIF, will use center")
                 }
-                
+
                 // 优先级3: 默认使用画面中央
-                Log.d("MainActivity", "Using center point for crop")
+                Log.d("ViewerActivity", "Using center point for crop")
                 return@withContext null
             }
-            
+
             // 3. 加载并裁剪图片
-            Log.d("MainActivity", "Loading detail image with crop center: $cropCenter")
-            
+            Log.d("ViewerActivity", "Loading detail image with crop center: $cropCenter")
+
             val croppedBitmap = withContext(Dispatchers.IO) {
                 try {
                     val uri = if (path.startsWith("content://") || path.startsWith("file://")) {
@@ -454,8 +454,8 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         Uri.fromFile(File(path))
                     }
-                    
-                    val decoder = contentResolver.openInputStream(uri)?.use { 
+
+                    val decoder = contentResolver.openInputStream(uri)?.use {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                             BitmapRegionDecoder.newInstance(it)
                         } else {
@@ -463,40 +463,40 @@ class MainActivity : AppCompatActivity() {
                             BitmapRegionDecoder.newInstance(it, false)
                         }
                     } ?: return@withContext null
-                    
+
                     val fullWidth = decoder.width
                     val fullHeight = decoder.height
-                    
+
                     // 计算裁剪区域
                     val cropSize = 300.dpToPx()
                     val centerX = cropCenter?.x ?: (fullWidth / 2)
                     val centerY = cropCenter?.y ?: (fullHeight / 2)
-                    
+
                     var left = centerX - cropSize / 2
                     var top = centerY - cropSize / 2
-                    
+
                     // 边界检查
                     left = left.coerceIn(0, (fullWidth - cropSize).coerceAtLeast(0))
                     top = top.coerceIn(0, (fullHeight - cropSize).coerceAtLeast(0))
-                    
+
                     val rect = Rect(left, top, left + cropSize, top + cropSize)
                     val cropped = decoder.decodeRegion(rect, null)
                     decoder.recycle()
-                    
-                    Log.d("MainActivity", "✅ Cropped bitmap: ${cropped?.width}x${cropped?.height}")
+
+                    Log.d("ViewerActivity", "✅ Cropped bitmap: ${cropped?.width}x${cropped?.height}")
                     cropped
                 } catch (e: Exception) {
-                    Log.e("MainActivity", "❌ Crop error", e)
+                    Log.e("ViewerActivity", "❌ Crop error", e)
                     null
                 }
             }
-            
+
             // 在主线程设置图片
             if (croppedBitmap != null) {
                 focusCheckImageView.setImageBitmap(croppedBitmap)
                 updateStatus("Ready: $fileName", isCameraConnected)
             } else {
-                Log.e("MainActivity", "Failed to create cropped bitmap")
+                Log.e("ViewerActivity", "Failed to create cropped bitmap")
             }
         }
     }
@@ -575,3 +575,6 @@ class MainActivity : AppCompatActivity() {
         return (this * density).toInt()
     }
 }
+
+
+

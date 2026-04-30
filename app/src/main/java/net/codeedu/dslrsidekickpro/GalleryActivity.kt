@@ -99,7 +99,7 @@ class GalleryActivity : AppCompatActivity() {
                 recyclerView.smoothScrollToPosition(0)
                 
                 if (fromLiveEvent) {
-                    val intent = Intent(this@GalleryActivity, MainActivity::class.java)
+                    val intent = Intent(this@GalleryActivity, ViewerActivity::class.java)
                     intent.putExtra("photo_path", displayPath)
                     startActivity(intent)
                 }
@@ -153,7 +153,7 @@ class GalleryActivity : AppCompatActivity() {
         recyclerView.layoutManager = GridLayoutManager(this, 4)
 
         adapter = PhotoAdapter(photoList) { path ->
-            val intent = Intent(this, MainActivity::class.java)
+            val intent = Intent(this, ViewerActivity::class.java)
             intent.putExtra("photo_path", path)
             startActivity(intent)
         }

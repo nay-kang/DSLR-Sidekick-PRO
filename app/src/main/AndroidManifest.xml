@@ -41,7 +41,7 @@
         </activity>
 
         <activity
-            android:name=".MainActivity"
+            android:name=".ViewerActivity"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|navigation"
             android:screenOrientation="sensorLandscape"
