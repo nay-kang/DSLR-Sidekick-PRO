@@ -30,7 +30,7 @@ external/
 
 ## Build
 
-- Gradle 9.4.1 / AGP 9.1.1 / KSP 2.1.10-1.0.30
+- Gradle 9.2.0 / AGP 9.2.0 / KSP 2.3.2
 - compileSdk 37 (Android 16 DP), minSdk 24, targetSdk 34
 - CMake 3.22.1 via NDK, ABIs: arm64-v8a + armeabi-v7a
 - `./gradlew assembleDebug` or `./gradlew build`
@@ -39,7 +39,7 @@ external/
 
 ## Key quirks
 
-- **compileSdk 37** is a pre-release Android SDK — build may need preview SDK installed. AGP 9.1.1 targets Java 11.
+- **compileSdk 37** is a pre-release Android SDK — build may need preview SDK installed. AGP 9.2.0 targets Java 11.
 - **Native code is Linux-only** — libusb uses linux_usbfs.c + linux_netlink.c. Passes `_GNU_SOURCE` and `-pthread`.
 - **Only PTP2 driver** — `ltdl_stub.c` maps `gp_port_library_operations` and `camera_init` to static PTP2 symbols. Adding new camera drivers requires extending the stub.
 - **Camera disconnect via null-port hack** (`cam->port = nullptr` in `native-lib.cpp:198`) — prevents libusb crash on cable unplug. Memory-safe for production but leaves a tiny leak.
@@ -50,3 +50,4 @@ external/
 - **PhotoWebServer** serves gallery from `assets/gallery.html` + `assets/js/gallery.js`. Thumbnails are center-cropped 200x200 JPEG at 75% quality.
 - **Foreground service** permissions: `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` on Android 14+.
  - **Portrait→Landscape transform**: `PhotoPagerAdapter.kt` contains a private Glide `BitmapTransformation` (`ForceLandscapeTransformation`) that rotates portrait bitmaps 90° at decode time. Glide still applies EXIF orientation first; the transformation is applied to both the thumbnail and main requests. This is implemented inline in the adapter (simple rotation via `Matrix`) rather than a separate utility class.
+- **Version**: v0.0.3 (versionCode 3)
