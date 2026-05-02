@@ -1,0 +1,54 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install CMake and NDK
+        run: |
+          sdkmanager "cmake;3.22.1" "ndk;27.0.12077973"
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "SENTRY_DSN=${{ secrets.SENTRY_DSN }}" >> local.properties
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > app/signing/release.jks
+
+      - name: Build signed release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Upload APK # Step name
+        uses: actions/upload-artifact@v4 # Action to upload artifacts (files) from the workflow
+        with:
+          name: release-apk # Name for the artifact
+          path: app/build/outputs/apk/release/app-release.apk # Path to the generated APK file (adjust if your app's output path is different)
