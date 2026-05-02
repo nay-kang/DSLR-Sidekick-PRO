@@ -106,7 +106,7 @@ class CameraService : Service() {
                 startForeground(1, notification)
             }
         } catch (e: Exception) {
-            Log.e("CameraService", "Failed to start foreground service", e)
+            AppLogger.e("CameraService", "Failed to start foreground service", e)
         }
     }
 
@@ -213,7 +213,7 @@ class CameraService : Service() {
             }
         } catch (e: Exception) {
             isConnecting = false
-            Log.e("CameraService", "Error in openAndConnect", e)
+            AppLogger.e("CameraService", "Error in openAndConnect", e)
             updateStatus(CameraStatus.DISCONNECTED, e.message)
         }
     }
@@ -301,7 +301,7 @@ class CameraService : Service() {
                     scanFolderRecursive(path, existingFiles, downloadedPaths, downloadedCountRef, totalCandidates, maxLocalSequence)
                 }
             } catch (e: Exception) {
-                Log.e("CameraService", "Sync error", e)
+                AppLogger.e("CameraService", "Sync error", e)
             } finally {
                 // Ensure we report the final count and shutdown executor even if an exception occurred
                 Log.i("CameraService", "Photo sync completed in ${System.currentTimeMillis() - syncStartTime}ms")
@@ -311,7 +311,7 @@ class CameraService : Service() {
                         updateStatus(CameraStatus.CONNECTED)
                     }
                 } catch (e: Exception) {
-                    Log.e("CameraService", "Error notifying sync completion", e)
+                    AppLogger.e("CameraService", "Error notifying sync completion", e)
                 }
                 // 确保 executor 被关闭，防止资源泄漏
                 syncExecutor.shutdown()
@@ -429,7 +429,7 @@ class CameraService : Service() {
                                 webServerIntent.putExtra(PhotoWebServerService.EXTRA_PHOTO_NAME, fileName)
                                 startService(webServerIntent)
                             } catch (e: Exception) {
-                                Log.e("CameraService", "Failed to send SSE notification", e)
+                                AppLogger.e("CameraService", "Failed to send SSE notification", e)
                             }
 
                             // update progress
@@ -437,14 +437,14 @@ class CameraService : Service() {
                                 downloadedCountRef[0]++
                                 listeners.forEach { listener -> listener.onSyncProgress(downloadedCountRef[0], if (totalCount > 0) totalCount else -1) }
                             } catch (e: Exception) {
-                                Log.e("CameraService", "Progress notify error", e)
+                                AppLogger.e("CameraService", "Progress notify error", e)
                             }
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e("CameraService", "Error scanning folder: $path", e)
+            AppLogger.e("CameraService", "Error scanning folder: $path", e)
         }
         return reachedThreshold
     }
@@ -499,18 +499,18 @@ class CameraService : Service() {
                                             webServerIntent.putExtra(PhotoWebServerService.EXTRA_PHOTO_NAME, fileName)
                                             startService(webServerIntent)
                                         } catch (e: Exception) {
-                                            Log.e("CameraService", "Failed to send SSE notification", e)
+                                            AppLogger.e("CameraService", "Failed to send SSE notification", e)
                                         }
                                     }
                                 }
                             } catch (e: Exception) {
-                                Log.e("CameraService", "Download error", e)
+                                AppLogger.e("CameraService", "Download error", e)
                             }
                         }
                     }
                 } catch (e: Exception) {
                     if (isCameraConnected) {
-                        Log.e("CameraService", "Polling error", e)
+                        AppLogger.e("CameraService", "Polling error", e)
                     }
                     if (!isCameraConnected) break
                 }
@@ -536,7 +536,7 @@ class CameraService : Service() {
             contentResolver.openOutputStream(file.uri)?.use { it.write(data) }
             file.uri
         } catch (e: Exception) {
-            Log.e("CameraService", "Error saving to SAF folder", e)
+            AppLogger.e("CameraService", "Error saving to SAF folder", e)
             null
         }
     }
@@ -579,7 +579,7 @@ class CameraService : Service() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e("CameraService", "Error listing SAF folder via DocumentsContract", e)
+                AppLogger.e("CameraService", "Error listing SAF folder via DocumentsContract", e)
             }
         }
 
@@ -599,7 +599,7 @@ class CameraService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e("CameraService", "Error getting real path from URI", e)
+            AppLogger.e("CameraService", "Error getting real path from URI", e)
             null
         }
     }
@@ -633,7 +633,7 @@ class CameraService : Service() {
             Log.d("CameraService", "Downloaded $fileName in ${elapsed}ms")
             result
         } catch (e: Exception) {
-            Log.e("CameraService", "Error downloading file with timeout", e)
+            AppLogger.e("CameraService", "Error downloading file with timeout", e)
             null
         }
     }

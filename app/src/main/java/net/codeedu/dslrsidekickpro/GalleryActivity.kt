@@ -296,7 +296,7 @@ class GalleryActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("GalleryActivity", "Fast sync error", e)
+                    AppLogger.e("GalleryActivity", "Fast sync error", e)
                 }
                 
                 // 先按序列号降序排列（快速）
@@ -343,7 +343,7 @@ class GalleryActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e("GalleryActivity", "Failed to optimize sort", e)
+                AppLogger.e("GalleryActivity", "Failed to optimize sort", e)
             }
         }
     }
@@ -370,7 +370,7 @@ class GalleryActivity : AppCompatActivity() {
                 } ?: System.currentTimeMillis()
             } ?: System.currentTimeMillis()
         } catch (e: Exception) {
-            Log.e("GalleryActivity", "Failed to read EXIF date for $uri", e)
+            AppLogger.e("GalleryActivity", "Failed to read EXIF date for $uri", e)
             System.currentTimeMillis()
         }
     }
@@ -424,12 +424,12 @@ class GalleryActivity : AppCompatActivity() {
                                     count++
                                 }
                             } catch (e: Exception) {
-                                Log.e("GalleryActivity", "Failed to delete photo: $docId", e)
+                                AppLogger.e("GalleryActivity", "Failed to delete photo: $docId", e)
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("GalleryActivity", "Clear photos error", e)
+                    AppLogger.e("GalleryActivity", "Clear photos error", e)
                 }
                 
                 count
@@ -489,7 +489,7 @@ class GalleryActivity : AppCompatActivity() {
             
             Log.i("GalleryActivity", "Web server started on port 8080")
         } catch (e: Exception) {
-            Log.e("GalleryActivity", "Failed to start web server", e)
+            AppLogger.e("GalleryActivity", "Failed to start web server", e)
             Snackbar.make(
                 findViewById(android.R.id.content),
                 "Failed to start web server: ${e.message}",
@@ -520,7 +520,7 @@ class GalleryActivity : AppCompatActivity() {
             
             Log.i("GalleryActivity", "Web server stopped")
         } catch (e: Exception) {
-            Log.e("GalleryActivity", "Failed to stop web server", e)
+            AppLogger.e("GalleryActivity", "Failed to stop web server", e)
         }
     }
 
@@ -546,7 +546,7 @@ class GalleryActivity : AppCompatActivity() {
                     ?.firstOrNull()?.hostAddress
                 ?: "your-device-ip"
         } catch (e: Exception) {
-            Log.e("GalleryActivity", "Error getting IP address via NetworkInterface", e)
+            AppLogger.e("GalleryActivity", "Error getting IP address via NetworkInterface", e)
             
             // Fallback: Use ConnectivityManager for modern Android
             try {
@@ -574,7 +574,7 @@ class GalleryActivity : AppCompatActivity() {
                     "your-device-ip"
                 }
             } catch (e2: Exception) {
-                Log.e("GalleryActivity", "Fallback IP detection also failed", e2)
+                AppLogger.e("GalleryActivity", "Fallback IP detection also failed", e2)
                 "your-device-ip"
             }
         }

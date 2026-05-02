@@ -111,7 +111,7 @@ class PhotoWebServerService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start foreground service", e)
+            AppLogger.e(TAG, "Failed to start foreground service", e)
         }
     }
 
@@ -130,7 +130,7 @@ class PhotoWebServerService : Service() {
             // Update notification with actual port
             updateNotification(port)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start web server", e)
+            AppLogger.e(TAG, "Failed to start web server", e)
         }
     }
 
@@ -140,7 +140,7 @@ class PhotoWebServerService : Service() {
             webServer = null
             Log.i(TAG, "Web server stopped")
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping web server", e)
+            AppLogger.e(TAG, "Error stopping web server", e)
         }
     }
 
@@ -196,7 +196,7 @@ class PhotoWebServerService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting photo list", e)
+            AppLogger.e(TAG, "Error getting photo list", e)
         }
 
         // Sort by last modified descending (newest first)
@@ -214,7 +214,7 @@ class PhotoWebServerService : Service() {
             try {
                 webServer?.notifyNewPhoto(fileName)
             } catch (e: Exception) {
-                Log.e(TAG, "Error notifying SSE clients", e)
+                AppLogger.e(TAG, "Error notifying SSE clients", e)
             }
         }.start()
     }
@@ -235,7 +235,7 @@ class PhotoWebServerService : Service() {
                 byteArrayOutputStream.toByteArray()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error reading photo data", e)
+            AppLogger.e(TAG, "Error reading photo data", e)
             null
         }
     }
@@ -268,7 +268,7 @@ class PhotoWebServerService : Service() {
                     )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error serving request: $uri", e)
+                AppLogger.e(TAG, "Error serving request: $uri", e)
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "text/plain",
@@ -377,7 +377,7 @@ class PhotoWebServerService : Service() {
                     htmlContent
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading gallery HTML", e)
+                AppLogger.e(TAG, "Error loading gallery HTML", e)
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "text/plain",
@@ -432,7 +432,7 @@ class PhotoWebServerService : Service() {
                     addHeader("Cache-Control", "no-cache")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error serving photo list", e)
+                AppLogger.e(TAG, "Error serving photo list", e)
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "application/json",
@@ -488,7 +488,7 @@ class PhotoWebServerService : Service() {
                     Log.d(TAG, "Client disconnected during photo transfer (normal)")
                     return newFixedLengthResponse(Response.Status.OK, "image/jpeg", java.io.ByteArrayInputStream(ByteArray(0)), 0)
                 }
-                Log.e(TAG, "Error serving photo", e)
+                AppLogger.e(TAG, "Error serving photo", e)
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "text/plain",
@@ -558,7 +558,7 @@ class PhotoWebServerService : Service() {
                     Log.d(TAG, "Client disconnected during thumbnail transfer (normal)")
                     return newFixedLengthResponse(Response.Status.OK, "image/jpeg", java.io.ByteArrayInputStream(ByteArray(0)), 0)
                 }
-                Log.e(TAG, "Error serving thumbnail", e)
+                AppLogger.e(TAG, "Error serving thumbnail", e)
                 newFixedLengthResponse(
                     Response.Status.INTERNAL_ERROR,
                     "text/plain",
@@ -619,7 +619,7 @@ class PhotoWebServerService : Service() {
                 
                 outputStream.toByteArray()
             } catch (e: Exception) {
-                Log.e(TAG, "Error creating square thumbnail", e)
+                AppLogger.e(TAG, "Error creating square thumbnail", e)
                 null
             }
         }
@@ -663,7 +663,7 @@ class PhotoWebServerService : Service() {
                     content
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Error serving static asset: $path", e)
+                AppLogger.e(TAG, "Error serving static asset: $path", e)
                 newFixedLengthResponse(
                     Response.Status.NOT_FOUND,
                     "text/plain",

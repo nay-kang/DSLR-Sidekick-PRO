@@ -17,6 +17,7 @@ app/src/main/java/net/codeedu/dslrsidekickpro/
   PhotoAdapter.kt            — RecyclerView adapter (Glide, 0.1x size multiplier)
   PhotoPagerAdapter.kt       — ViewPager2 adapter with ForceLandscapeTransformation (rotates portrait images 90° via a small Glide BitmapTransformation; applied to both thumbnail and main requests)
   AppGlideModule.kt          — Glide KSP app module
+  AppLogger.kt               — Sentry helper for captured/caught exceptions, breadcrumbs, and manual events
 
 app/src/main/cpp/
   native-lib.cpp             — 7 JNI functions (connect, disconnect, poll, list folders/files, download)
@@ -35,6 +36,7 @@ external/
 - CMake 3.22.1 via NDK, ABIs: arm64-v8a + armeabi-v7a
 - `./gradlew assembleDebug` or `./gradlew build`
 - NDK + SDK path in `local.properties`
+- Sentry DSN is read from ignored `local.properties` key `SENTRY_DSN` and injected into `AndroidManifest.xml` via manifest placeholders
 - No lint, no typecheck, no formatter configured
 
 ## Key quirks
@@ -49,5 +51,6 @@ external/
 - **Glide version note**: `glide = 5.0.5` but `glideKsp = 5.0.7` in `libs.versions.toml`.
 - **PhotoWebServer** serves gallery from `assets/gallery.html` + `assets/js/gallery.js`. Thumbnails are center-cropped 200x200 JPEG at 75% quality.
 - **Foreground service** permissions: `FOREGROUND_SERVICE` + `FOREGROUND_SERVICE_DATA_SYNC` on Android 14+.
- - **Portrait→Landscape transform**: `PhotoPagerAdapter.kt` contains a private Glide `BitmapTransformation` (`ForceLandscapeTransformation`) that rotates portrait bitmaps 90° at decode time. Glide still applies EXIF orientation first; the transformation is applied to both the thumbnail and main requests. This is implemented inline in the adapter (simple rotation via `Matrix`) rather than a separate utility class.
+- **Sentry** uses `io.sentry:sentry-android` with manifest auto-init (no custom `Application` class). `io.sentry.dsn` and `io.sentry.environment` are Gradle manifest placeholders; debug builds set environment to `debug`, release/default to `production`. Uncaught exceptions are captured automatically; caught exceptions should use `AppLogger.e(...)` when they are important enough to report.
+- **Portrait→Landscape transform**: `PhotoPagerAdapter.kt` contains a private Glide `BitmapTransformation` (`ForceLandscapeTransformation`) that rotates portrait bitmaps 90° at decode time. Glide still applies EXIF orientation first; the transformation is applied to both the thumbnail and main requests. This is implemented inline in the adapter (simple rotation via `Matrix`) rather than a separate utility class.
 - **Version**: v0.0.3 (versionCode 3)

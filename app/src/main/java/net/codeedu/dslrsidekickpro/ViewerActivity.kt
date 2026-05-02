@@ -255,7 +255,7 @@ open class ViewerActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("ViewerActivity", "Fast sync error", e)
+                    AppLogger.e("ViewerActivity", "Fast sync error", e)
                 }
 
                 result.sortByDescending { it.second } // 降序排列：新的在前（索引0），旧的在后
@@ -328,7 +328,7 @@ open class ViewerActivity : AppCompatActivity() {
                     val focalLength = formatFocalLength(exif?.getAttribute(ExifInterface.TAG_FOCAL_LENGTH))
                     "f/$aperture   ${formatShutter(shutter)}s   ISO $iso   ${focalLength}mm"
                 } catch (e: Exception) {
-                    Log.e("ViewerActivity", "EXIF read error", e)
+                    AppLogger.e("ViewerActivity", "EXIF read error", e)
                     "--   --   --   --"
                 }
             }
@@ -404,7 +404,7 @@ open class ViewerActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("ViewerActivity", "Eye detection error", e)
+                    AppLogger.e("ViewerActivity", "Eye detection error", e)
                 } finally {
                     bitmap?.recycle()
                 }
@@ -486,7 +486,7 @@ open class ViewerActivity : AppCompatActivity() {
                     Log.d("ViewerActivity", "✅ Cropped bitmap: ${cropped?.width}x${cropped?.height}")
                     cropped
                 } catch (e: Exception) {
-                    Log.e("ViewerActivity", "❌ Crop error", e)
+                    AppLogger.e("ViewerActivity", "❌ Crop error", e)
                     null
                 }
             }
@@ -496,7 +496,7 @@ open class ViewerActivity : AppCompatActivity() {
                 focusCheckImageView.setImageBitmap(croppedBitmap)
                 updateStatus("Ready: $fileName", isCameraConnected)
             } else {
-                Log.e("ViewerActivity", "Failed to create cropped bitmap")
+                AppLogger.e("ViewerActivity", "Failed to create cropped bitmap")
             }
         }
     }

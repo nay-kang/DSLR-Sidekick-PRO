@@ -1,11 +1,17 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import com.android.build.api.dsl.ApplicationExtension
+import java.util.Properties
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.ksp)
 }
+
+val localProperties = Properties().apply {
+    rootProject.file("local.properties").inputStream().use(::load)
+}
+val sentryDsn = localProperties.getProperty("SENTRY_DSN", "")
 
 configure<ApplicationExtension> {
     namespace = "net.codeedu.dslrsidekickpro"
@@ -19,6 +25,8 @@ configure<ApplicationExtension> {
         versionName = "0.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["SENTRY_DSN"] = sentryDsn
+        manifestPlaceholders["SENTRY_ENVIRONMENT"] = "production"
 
         // Use property access instead of the incubating function
         externalNativeBuild.cmake {
@@ -45,6 +53,12 @@ configure<ApplicationExtension> {
     }
 
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            manifestPlaceholders["SENTRY_ENVIRONMENT"] = "debug"
+        }
+        
         getByName("release") {
             isMinifyEnabled = false
             proguardFiles(
@@ -84,6 +98,7 @@ dependencies {
     implementation(libs.photoview)
     implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.nanohttpd)
+    implementation(libs.sentry.android)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

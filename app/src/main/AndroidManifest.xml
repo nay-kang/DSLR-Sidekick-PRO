@@ -59,6 +59,14 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- Sentry auto-initializes from manifest metadata. DSN is injected by Gradle. -->
+        <meta-data
+            android:name="io.sentry.dsn"
+            android:value="${SENTRY_DSN}" />
+        <meta-data
+            android:name="io.sentry.environment"
+            android:value="${SENTRY_ENVIRONMENT}" />
+
     </application>
 
 </manifest>
