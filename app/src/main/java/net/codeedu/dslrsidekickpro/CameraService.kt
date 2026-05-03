@@ -175,7 +175,13 @@ class CameraService : Service() {
         isConnecting = true
         try {
             usbDeviceConnection?.close()
-            usbDeviceConnection = usbManager.openDevice(device)
+            
+            // Refresh device list to get current device path (fix for mismatched device paths)
+            val refreshedDevice = usbManager.deviceList.values.find { 
+                it.vendorId == device.vendorId && it.productId == device.productId 
+            } ?: device
+            
+            usbDeviceConnection = usbManager.openDevice(refreshedDevice)
             val connection = usbDeviceConnection
             if (connection != null) {
                 val fd = connection.fileDescriptor
